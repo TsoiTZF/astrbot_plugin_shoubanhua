@@ -3560,17 +3560,18 @@ class FigurineProPlugin(Star):
     async def on_switch_mode(self, event: AstrMessageEvent, ctx=None):
         if not self.is_admin(event): return
         mode = event.message_str.split()[-1].strip().lower()
-        aliases = {"generic": "openai_chat"}
+        aliases = {
+            "generic": "openai_chat",
+            "gemini": "gemini_official",
+        }
         mode = aliases.get(mode, mode)
         if mode in ["openai_image", "openai_chat", "gemini_official", "custom_endpoint"]:
             self.conf["interface_mode"] = mode
-            # 同步旧字段，方便旧版插件回滚后仍能读取。
-            self.conf["api_mode"] = "gemini_official" if mode == "gemini_official" else "generic"
-            self._save_config(["interface_mode", "api_mode"])
+            self._save_config(["interface_mode"])
             yield event.chain_result([Plain(f"✅ 已切换为 {mode}")])
         else:
             yield event.chain_result([Plain(
-                "模式无效 (openai_image / openai_chat / gemini_official / custom_endpoint)"
+                "模式无效 (openai_image / openai_chat / gemini_official / custom_endpoint；旧 generic 仍兼容)"
             )])
 
     @filter.command("切换模型", prefix_optional=True)

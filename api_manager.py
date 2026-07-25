@@ -198,7 +198,8 @@ class ApiManager:
             return str(self.config.get("text_to_image_api_url") or "").strip()
 
         if mode == "gemini_official":
-            return str(self.config.get("gemini_api_url", "") or "").strip()
+            legacy_url = str(self.config.get("gemini_api_url", "") or "").strip()
+            return legacy_url or "https://generativelanguage.googleapis.com/v1beta"
         return str(self.config.get("generic_api_url", "") or "").strip()
 
     async def get_key(self, mode: str, use_text_to_image_api: bool = False) -> str | None:

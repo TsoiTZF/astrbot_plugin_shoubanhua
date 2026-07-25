@@ -14,56 +14,14 @@
     "base_url": {
         "description": "接口地址",
         "type": "string",
-        "hint": "标准/对话模式通常填写 https://api.example.com/v1；Gemini 官方模式可留空或填写 https://generativelanguage.googleapis.com/v1beta；自定义模式必须填写完整请求路径，例如 https://api.example.com/v1/images/generations。留空时兼容读取旧版 generic_api_url / gemini_api_url。",
+        "hint": "标准/对话模式通常填写 https://api.example.com/v1；Gemini 官方模式可留空或填写 https://generativelanguage.googleapis.com/v1beta；自定义模式必须填写完整请求路径，例如 https://api.example.com/v1/images/generations。",
         "default": ""
     },
     "api_keys": {
         "description": "API Keys",
         "type": "text",
-        "hint": "可填写一个或多个 key，多个 key 建议按行填写。留空时兼容读取旧版 generic_api_keys / gemini_api_keys。",
+        "hint": "可填写一个或多个 key，多个 key 建议按行填写。",
         "default": ""
-    },
-    "generic_api_url": {
-        "description": "【Generic】API基础地址",
-        "type": "string",
-        "hint": "Generic模式(OpenAI格式)专用：只需填写基础URL（如 https://api.bltcy.ai 或 https://api.bltcy.ai/v1），插件会自动拼接 chat/completions、images/generations、images/edits 等路径。即使误填成 /v1/chat/completions 或 /v1/images/edits，也会自动忽略尾部路径后重新拼接。",
-        "default": "https://api.bltcy.ai"
-    },
-    "generic_api_keys": {
-        "description": "【Generic】API Key 池",
-        "type": "list",
-        "hint": "Generic模式专用的Key轮询池。",
-        "items": {
-            "type": "string",
-            "description": "sk-..."
-        },
-        "default": []
-    },
-    "gemini_api_url": {
-        "description": "【Gemini官方】API Base地址",
-        "type": "string",
-        "hint": "Gemini官方模式专用：填Base URL（如 https://generativelanguage.googleapis.com）。",
-        "default": "https://generativelanguage.googleapis.com"
-    },
-    "gemini_api_keys": {
-        "description": "【Gemini官方】API Key 池",
-        "type": "list",
-        "hint": "Gemini官方模式专用的Key轮询池。",
-        "items": {
-            "type": "string",
-            "description": "AIza..."
-        },
-        "default": []
-    },
-    "api_mode": {
-        "description": "【旧版兼容】API 协议模式",
-        "type": "string",
-        "hint": "仅用于兼容旧配置。新配置请使用顶部的 interface_mode、base_url、api_keys。",
-        "default": "generic",
-        "options": [
-            "generic",
-            "gemini_official"
-        ]
     },
     "model_list": {
         "description": "【核心】模型列表配置（仅用于展示/序号切换）",
@@ -218,12 +176,6 @@
         "description": "【网络】启用流式请求（仅generic模式）",
         "type": "bool",
         "hint": "开启后使用SSE流式请求，避免Cloudflare 100秒超时限制（524错误）。推荐开启，仅对generic模式生效。",
-        "default": false
-    },
-    "generic_prefer_images_api": {
-        "description": "【Generic】优先直连图片接口",
-        "type": "bool",
-        "hint": "开启后，Generic模式会优先直接调用 images/generations 或 images/edits，而不是先走 chat/completions 再回退。适合明确使用图片模型接口的中转站。",
         "default": false
     },
     "download_retries": {
