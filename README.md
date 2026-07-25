@@ -19,6 +19,13 @@
 - 留空则使用默认模型
 - 位于配置文件【通用】默认模型名称下方
 
+### 图片参数自动识别
+- 提示词中的 `16:9`、`9:16`、`4:3`、`1K`、`2K`、`4K` 会自动转换为接口请求参数
+- `gpt-image-2` / OpenAI Images API 会自动填写对应像素 `size`，例如 `16:9 + 4K` 对应 `3840x2160`
+- Gemini 官方接口会自动填写 `generationConfig.imageConfig.aspectRatio` 和 `imageSize`
+- 文生图未指定比例时使用可配置的 `image_aspect_ratio`（默认 `4:3`）
+- 图生图未指定比例时读取原图尺寸，自动匹配最接近的常规比例
+
 ### 支持预设图片上传
 - 上传预设词的同时部分预设需要参考图  就可以是用上传预设参考图（#预设参考图添加 手办化（引用图片））
 
@@ -81,7 +88,7 @@
 
 | 指令 | 别名 | 说明 |
 | :--- | :--- | :--- |
-| `#切换API模式` | - | 在 generic 和 gemini_official 模式间切换（管理员） |
+| `#切换API模式 <模式>` | - | 切换 openai_image / openai_chat / gemini_official / custom_endpoint（管理员） |
 | `#切换模型 <模型名>` | - | 切换当前使用的AI模型（管理员） |
 
 ### 📊 统计与管理类
@@ -156,6 +163,11 @@
 | 配置项 | 说明 | 默认值 |
 | --- | --- | --- |
 | `text_to_image_model` | 文生图专用模型ID，留空使用默认模型 | 空 |
+| `interface_mode` | 接口模式：openai_image / openai_chat / gemini_official / custom_endpoint | openai_image |
+| `base_url` | 统一接口地址；custom_endpoint 模式必须填写完整请求路径 | 空 |
+| `api_keys` | 统一 API Key，多条按行填写 | 空 |
+| `image_resolution` | 提示词未指定时使用的默认分辨率 | 1K |
+| `image_aspect_ratio` | 文生图未指定时使用的默认比例；图生图会自动读取原图比例 | 4:3 |
 | `llm_show_progress` | LLM工具调用时是否显示进度提示 | true |
 | `llm_cooldown_seconds` | LLM工具调用冷却时间（秒），设为0不限制 | 60 |
 | `enable_rebellious_mode` | 启用叛逆模式 | true |
@@ -209,15 +221,19 @@
 
 | 配置项 | 说明 |
 | --- | --- |
+| `interface_mode` | `openai_image` 标准图片接口；`openai_chat` 对话中转；`gemini_official` Gemini 官方；`custom_endpoint` 自定义完整路径 |
+| `base_url` | 统一接口地址；自定义模式下不会自动追加任何路径 |
+| `api_keys` | 统一 Key 池，支持按行填写多个 Key |
 | `generic_api_url` | Generic 模式 API 基础地址，例如 https://api.example.com 或 https://api.example.com/v1；插件会自动拼接 `/v1/chat/completions`、`/v1/images/generations`、`/v1/images/edits`，即使误填完整接口路径也会自动修正 |
 | `generic_api_keys` | Generic 模式 Key 池（可多条轮询），示例：123 |
 | `generic_prefer_images_api` | 开启后，Generic 模式优先直接走 `images/generations` / `images/edits`，不先走 `chat/completions` |
 | `gemini_api_url` | Gemini 官方 Base 地址，默认 https://generativelanguage.googleapis.com |
 | `gemini_api_keys` | Gemini 官方模式 Key 池 |
-| `api_mode` | 协议模式：generic / gemini_official |
+| `api_mode` | 旧版兼容字段；新配置请使用 `interface_mode` |
 | `model_list` | 可用模型 ID 列表，默认包含 nano-banana 等 |
 | `model` | 默认模型（需在模型列表中存在），示例：gemini-2.5-flash-preview-image |
 | `image_resolution` | 画质/分辨率参数，例：4K |
+| `image_aspect_ratio` | 文生图默认比例，默认 4:3；图生图未指定比例时自动跟随原图常规比例 |
 | `show_model_info` | 是否在成功/失败消息中显示实际调用模型 |
 | `debug_mode` | 调试模式，开启后报错会附加完整错误内容 |
 | `prefix` | 是否需要命令前缀或 @ 才触发 |

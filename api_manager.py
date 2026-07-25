@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 import aiohttp
 from typing import List, Dict
 from astrbot import logger
+from .generation_params import detect_aspect_ratio_from_image, resolve_image_generation_params
 
 
 class ApiManager:
@@ -17,6 +18,7 @@ class ApiManager:
         self.key_lock = asyncio.Lock()
         self.generic_idx = 0
         self.gemini_idx = 0
+        self.unified_idx = 0
         self._session = None # 保持 Session 持久化，复用 TCP/SSL 连接
         self._last_metrics = {}
         self._last_download_metrics = {}
@@ -75,16 +77,24 @@ class ApiManager:
 
     async def _call_api_with_luxury_mode(self, images: List[bytes], prompt: str,
                                          model: str, proxy: str = None,
-                                         use_text_to_image_api: bool = False) -> bytes | str:
+                                         use_text_to_image_api: bool = False,
+                                         aspect_ratio: str = None,
+                                         resolution: str = None) -> bytes | str:
         """奢侈模式：同一请求并发多次，只取首个成功结果，其余丢弃。"""
         luxury_count = self._get_luxury_request_count()
         if luxury_count <= 1:
-            return await self._call_api_once(images, prompt, model, proxy, use_text_to_image_api)
+            return await self._call_api_once(
+                images, prompt, model, proxy, use_text_to_image_api,
+                aspect_ratio=aspect_ratio, resolution=resolution
+            )
 
         logger.info(f"奢侈模式已启用：同一请求并发 {luxury_count} 次，仅取其中一张成功图片")
 
         tasks = [
-            asyncio.create_task(self._call_api_once(images, prompt, model, proxy, use_text_to_image_api))
+            asyncio.create_task(self._call_api_once(
+                images, prompt, model, proxy, use_text_to_image_api,
+                aspect_ratio=aspect_ratio, resolution=resolution
+            ))
             for _ in range(luxury_count)
         ]
 
@@ -152,31 +162,63 @@ class ApiManager:
             return None
         return proxy
 
+    @staticmethod
+    def _normalize_keys(keys) -> List[str]:
+        """兼容配置面板的多行文本、逗号分隔文本和旧版 list。"""
+        if not keys:
+            return []
+        if isinstance(keys, str):
+            return [item.strip() for item in re.split(r"[\r\n,]+", keys) if item.strip()]
+        if isinstance(keys, (list, tuple, set)):
+            return [str(item).strip() for item in keys if str(item).strip()]
+        return [str(keys).strip()] if str(keys).strip() else []
+
+    def _get_interface_mode(self) -> str:
+        """读取新版接口模式，并兼容旧版 generic 配置。"""
+        mode = str(self.config.get("interface_mode", "") or "").strip().lower()
+        valid_modes = {"openai_image", "openai_chat", "gemini_official", "custom_endpoint"}
+        if mode in valid_modes:
+            return mode
+
+        legacy_mode = str(self.config.get("api_mode", "generic") or "generic").strip().lower()
+        if legacy_mode == "gemini_official":
+            return "gemini_official"
+        if legacy_mode == "openai_image":
+            return "openai_image"
+        if legacy_mode == "custom_endpoint":
+            return "custom_endpoint"
+        return "openai_image" if self.config.get("generic_prefer_images_api", False) else "openai_chat"
+
+    def _get_base_url(self, mode: str, use_text_to_image_api: bool = False) -> str:
+        unified_base = str(self.config.get("base_url", "") or "").strip()
+        if unified_base:
+            return unified_base
+
+        if use_text_to_image_api and self.config.get("text_to_image_api_url"):
+            return str(self.config.get("text_to_image_api_url") or "").strip()
+
+        if mode == "gemini_official":
+            return str(self.config.get("gemini_api_url", "") or "").strip()
+        return str(self.config.get("generic_api_url", "") or "").strip()
+
     async def get_key(self, mode: str, use_text_to_image_api: bool = False) -> str | None:
         """获取轮询 Key"""
         async with self.key_lock:
+            keys = self._normalize_keys(self.config.get("api_keys", []))
+            if keys:
+                k = keys[self.unified_idx % len(keys)]
+                self.unified_idx += 1
+                return k
+
             if use_text_to_image_api:
-                if mode == "gemini_official":
-                    keys = self.config.get("text_to_image_api_keys", [])
-                    if not keys:
-                        keys = self.config.get("gemini_api_keys", [])
-                    if not keys:
-                        return None
-                    k = keys[self.gemini_idx % len(keys)]
-                    self.gemini_idx += 1
-                    return k
-                else:
-                    keys = self.config.get("text_to_image_api_keys", [])
-                    if not keys:
-                        keys = self.config.get("generic_api_keys", [])
-                    if not keys:
-                        return None
-                    k = keys[self.generic_idx % len(keys)]
-                    self.generic_idx += 1
+                keys = self._normalize_keys(self.config.get("text_to_image_api_keys", []))
+                if keys:
+                    k = keys[self.unified_idx % len(keys)]
+                    self.unified_idx += 1
                     return k
 
             if mode == "gemini_official":
-                keys = self.config.get("gemini_api_keys", [])
+                keys = self._normalize_keys(self.config.get("gemini_api_keys", []))
 
                 if not keys:
                     return None
@@ -184,7 +226,7 @@ class ApiManager:
                 self.gemini_idx += 1
                 return k
             else:
-                keys = self.config.get("generic_api_keys", [])
+                keys = self._normalize_keys(self.config.get("generic_api_keys", []))
 
                 if not keys:
                     return None
@@ -535,17 +577,24 @@ class ApiManager:
         return await self._download_result_image(img_url, proxy)
 
     async def _call_images_api_multipart(self, images: List[bytes], prompt: str,
-                                         model: str, key: str, base_url: str, proxy: str = None) -> bytes | str:
+                                         model: str, key: str, base_url: str, proxy: str = None,
+                                         generation_params: Dict = None,
+                                         exact_endpoint: bool = False) -> bytes | str:
         """以 multipart/form-data 方式调用 Images API，兼容部分仅接受文件上传的编辑接口"""
         has_input_image = bool(images)
-        candidate_urls = self._build_candidate_generic_image_urls(base_url, has_input_image=has_input_image)
+        candidate_urls = [base_url.rstrip("/")] if exact_endpoint else self._build_candidate_generic_image_urls(
+            base_url, has_input_image=has_input_image
+        )
         logger.info(f"Retry Images API with multipart/form-data, candidate urls: {candidate_urls}")
 
         headers = {
             "Authorization": f"Bearer {key}"
         }
 
-        res_set = self.config.get("image_resolution", "1K")
+        generation_params = generation_params or resolve_image_generation_params(
+            prompt, self.config.get("image_resolution", "1K")
+        )
+        res_set = generation_params["resolution"]
         final_prompt = f"(Masterpiece, Best Quality, {res_set} Resolution), {prompt}" if res_set != "1K" else prompt
 
         timeout_val = self.config.get("timeout", 120)
@@ -558,7 +607,9 @@ class ApiManager:
                 form.add_field("model", model)
                 form.add_field("prompt", final_prompt)
                 form.add_field("n", "1")
-                form.add_field("response_format", "b64_json")
+                form.add_field("size", generation_params["size"])
+                if not str(model).lower().startswith("gpt-image"):
+                    form.add_field("response_format", "b64_json")
 
                 if images:
                     img = images[0]
@@ -608,11 +659,15 @@ class ApiManager:
             return f"系统错误: {err_msg}"
 
     async def call_images_api(self, images: List[bytes], prompt: str,
-                               model: str, key: str, base_url: str, proxy: str = None) -> bytes | str:
+                               model: str, key: str, base_url: str, proxy: str = None,
+                               generation_params: Dict = None,
+                               exact_endpoint: bool = False) -> bytes | str:
         """调用 Images API (DALL-E 风格接口) - 作为 fallback"""
 
         has_input_image = bool(images)
-        candidate_urls = self._build_candidate_generic_image_urls(base_url, has_input_image=has_input_image)
+        candidate_urls = [base_url.rstrip("/")] if exact_endpoint else self._build_candidate_generic_image_urls(
+            base_url, has_input_image=has_input_image
+        )
         logger.info(f"Fallback to Images API, candidate urls: {candidate_urls}")
 
         headers = {
@@ -621,7 +676,10 @@ class ApiManager:
         }
 
         # 画质强化 Prompt
-        res_set = self.config.get("image_resolution", "1K")
+        generation_params = generation_params or resolve_image_generation_params(
+            prompt, self.config.get("image_resolution", "1K")
+        )
+        res_set = generation_params["resolution"]
         final_prompt = f"(Masterpiece, Best Quality, {res_set} Resolution), {prompt}" if res_set != "1K" else prompt
 
         # 构造 Images API 请求
@@ -629,8 +687,10 @@ class ApiManager:
             "model": model,
             "prompt": final_prompt,
             "n": 1,
-            "response_format": "b64_json"
+            "size": generation_params["size"],
         }
+        if not str(model).lower().startswith("gpt-image"):
+            payload["response_format"] = "b64_json"
 
         # 如果有输入图片，兼容不同 Images API 的字段要求
         # 一些服务要求 image_url；另一些只认 image / input_image / images
@@ -677,7 +737,11 @@ class ApiManager:
 
                         if self._should_retry_images_api_with_multipart(err_msg, has_input_image):
                             logger.info("Images API JSON 请求失败，检测到服务端更偏好 multipart/form-data，自动重试")
-                            return await self._call_images_api_multipart(images, prompt, model, key, base_url, proxy)
+                            return await self._call_images_api_multipart(
+                                images, prompt, model, key, base_url, proxy,
+                                generation_params=generation_params,
+                                exact_endpoint=exact_endpoint,
+                            )
 
                         return f"Images API Error {resp.status}: {err_msg[:300]} | URL: {url}"
 
@@ -915,53 +979,45 @@ class ApiManager:
     async def call_api(self, images: List[bytes], prompt: str,
                        model: str, legacy_use_power_or_proxy=None,
                        proxy: str = None,
-                       use_text_to_image_api: bool = False) -> bytes | str:
+                       use_text_to_image_api: bool = False,
+                       aspect_ratio: str = None,
+                       resolution: str = None) -> bytes | str:
         proxy, use_text_to_image_api = self._normalize_call_api_args(
             legacy_use_power_or_proxy, proxy, use_text_to_image_api
         )
 
         if self.config.get("enable_luxury_mode", False):
             return await self._call_api_with_luxury_mode(
-                images, prompt, model, proxy, use_text_to_image_api
+                images, prompt, model, proxy, use_text_to_image_api,
+                aspect_ratio=aspect_ratio, resolution=resolution
             )
 
         return await self._call_api_once(
-            images, prompt, model, proxy, use_text_to_image_api
+            images, prompt, model, proxy, use_text_to_image_api,
+            aspect_ratio=aspect_ratio, resolution=resolution
         )
 
     async def _call_api_once(self, images: List[bytes], prompt: str,
                              model: str, proxy: str = None,
-                             use_text_to_image_api: bool = False) -> bytes | str:
+                             use_text_to_image_api: bool = False,
+                             aspect_ratio: str = None,
+                             resolution: str = None) -> bytes | str:
         """核心生成逻辑"""
 
         self._reset_metrics()
         call_start = asyncio.get_running_loop().time()
 
-        mode = self.config.get("api_mode", "generic")
+        interface_mode = self._get_interface_mode()
+        mode = "gemini_official" if interface_mode == "gemini_official" else "generic"
 
         # 1. 确定 URL
-        if use_text_to_image_api:
-            if mode == "gemini_official":
-                base = (
-                    self.config.get("text_to_image_api_url")
-                    or self.config.get("gemini_api_url")
-                )
-            else:
-                base = (
-                    self.config.get("text_to_image_api_url")
-                    or self.config.get("generic_api_url")
-                )
-        else:
-            if mode == "gemini_official":
-                base = self.config.get("gemini_api_url")
-            else:
-                base = self.config.get("generic_api_url")
+        base = self._get_base_url(interface_mode, use_text_to_image_api=use_text_to_image_api)
 
         if not base:
             return "API URL 未配置"
 
         # 2. 获取 Key
-        key = await self.get_key(mode, use_text_to_image_api=use_text_to_image_api)
+        key = await self.get_key(interface_mode, use_text_to_image_api=use_text_to_image_api)
         if not key:
             return "无可用 API Key"
 
@@ -970,12 +1026,50 @@ class ApiManager:
         payload = {}
         url = base.rstrip("/")
 
+        default_aspect_ratio = self.config.get("image_aspect_ratio", "4:3")
+        if images:
+            default_aspect_ratio = detect_aspect_ratio_from_image(images[0], default_aspect_ratio)
+
+        generation_params = resolve_image_generation_params(
+            prompt,
+            default_resolution=self.config.get("image_resolution", "1K"),
+            default_aspect_ratio=default_aspect_ratio,
+            resolution=resolution,
+            aspect_ratio=aspect_ratio,
+        )
+        logger.info(
+            f"图片参数已解析: aspect_ratio={generation_params['aspect_ratio']}, "
+            f"resolution={generation_params['resolution']}, size={generation_params['size']}"
+        )
+
+        custom_kind = ""
+        if interface_mode == "custom_endpoint":
+            lower_url = url.lower()
+            if "generatecontent" in lower_url:
+                custom_kind = "gemini"
+                mode = "gemini_official"
+            elif "chat/completions" in lower_url:
+                custom_kind = "chat"
+                mode = "generic"
+            else:
+                custom_kind = "image"
+
+        if interface_mode == "openai_image" or custom_kind == "image":
+            return await self.call_images_api(
+                images, prompt, model, key, base, proxy,
+                generation_params=generation_params,
+                exact_endpoint=(interface_mode == "custom_endpoint"),
+            )
+
         # 对于明确使用 Generic 图片接口的站点，可配置为优先直连 Images API
         # 但当输入为多图时，优先走 chat/completions 以保留全部参考图（Images API 常只接受单图编辑）。
-        if mode == "generic" and self.config.get("generic_prefer_images_api", False):
+        if interface_mode == "openai_chat" and self.config.get("generic_prefer_images_api", False):
             if len(images) <= 1:
                 logger.info("已启用 generic_prefer_images_api，优先直接走 Images API")
-                image_api_result = await self.call_images_api(images, prompt, model, key, base, proxy)
+                image_api_result = await self.call_images_api(
+                    images, prompt, model, key, base, proxy,
+                    generation_params=generation_params
+                )
                 if not (
                         images
                         and isinstance(image_api_result, str)
@@ -989,34 +1083,34 @@ class ApiManager:
             )
 
         # 画质强化 Prompt
-        res_set = self.config.get("image_resolution", "1K")
+        res_set = generation_params["resolution"]
         final_prompt = f"(Masterpiece, Best Quality, {res_set} Resolution), {prompt}" if res_set != "1K" else prompt
 
         if mode == "gemini_official":
             # --- 修复核心：Gemini URL 智能构造 ---
             # 如果 URL 里没有 'models' 关键字且不是 OneAPI 风格，说明填的是 Base URL
+            if interface_mode != "custom_endpoint":
+                # 补全 v1/v1beta
+                if "/v1" not in url and "/v1beta" not in url:
+                    url += "/v1beta"
 
-            # 补全 v1/v1beta
-            if "/v1" not in url and "/v1beta" not in url:
-                url += "/v1beta"
+                # 补全 /models
+                if "/models" not in url:
+                    url += "/models"
 
-            # 补全 /models
-            if "/models" not in url:
-                url += "/models"
+                # 拼接 Model (防止 url 中已经包含了 model)
+                if f"/{model}" not in url:
+                    url += f"/{model}"
 
-            # 拼接 Model (防止 url 中已经包含了 model)
-            if f"/{model}" not in url:
-                url += f"/{model}"
+                # 拼接动作
+                if ":generateContent" not in url:
+                    url += ":generateContent"
 
-            # 拼接动作
-            if ":generateContent" not in url:
-                url += ":generateContent"
-
-            # 认证：Query 参数 + Header 双重保险
-            if "?" in url:
-                url += f"&key={key}"
-            else:
-                url += f"?key={key}"
+                # 认证：Query 参数 + Header 双重保险
+                if "?" in url:
+                    url += f"&key={key}"
+                else:
+                    url += f"?key={key}"
             headers["x-goog-api-key"] = key
 
             parts = [{"text": final_prompt}]
@@ -1029,7 +1123,10 @@ class ApiManager:
                 "generationConfig": {
                     "maxOutputTokens": 4096,
                     "responseModalities": ["TEXT", "IMAGE"],
-                    # "aspectRatio": "1:1" # Gemini 可能需要显式比例，暂保持默认
+                    "imageConfig": {
+                        "aspectRatio": generation_params["aspect_ratio"],
+                        "imageSize": generation_params["resolution"],
+                    },
                 },
                 "safetySettings": [{"category": c, "threshold": "BLOCK_NONE"} for c in
                                    ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
@@ -1072,6 +1169,12 @@ class ApiManager:
                                              ["HARM_CATEGORY_HARASSMENT", "HARM_CATEGORY_HATE_SPEECH",
                                               "HARM_CATEGORY_SEXUALLY_EXPLICIT", "HARM_CATEGORY_DANGEROUS_CONTENT",
                                               "HARM_CATEGORY_CIVIC_INTEGRITY"]]
+
+                # 兼容通过 OpenAI chat/completions 转发 Gemini 图片模型的中转站。
+                payload["image_config"] = {
+                    "aspect_ratio": generation_params["aspect_ratio"],
+                    "image_size": generation_params["resolution"],
+                }
         
         # 4. 发送请求
         try:
@@ -1082,7 +1185,9 @@ class ApiManager:
             session = await self._get_session()
             
             candidate_urls = [url]
-            if mode == "generic":
+            if interface_mode == "custom_endpoint":
+                candidate_urls = [base.rstrip("/")]
+            elif mode == "generic":
                 candidate_urls = self._build_candidate_generic_chat_urls(base)
 
             logger.info(f"Generic API 候选地址: {candidate_urls}")
@@ -1111,9 +1216,12 @@ class ApiManager:
                             if "error" in err_json:
                                 err_msg = json.dumps(err_json["error"], ensure_ascii=False)
 
-                                if mode == "generic" and self._should_fallback_to_images_api(err_msg, bool(images)):
+                                if interface_mode == "openai_chat" and self._should_fallback_to_images_api(err_msg, bool(images)):
                                     logger.info(f"模型 {model} 当前错误适合切换到 Images API，自动回退处理")
-                                    return await self.call_images_api(images, prompt, model, key, base, proxy)
+                                    return await self.call_images_api(
+                                        images, prompt, model, key, base, proxy,
+                                        generation_params=generation_params
+                                    )
 
                                 return f"API Error {resp.status}: {err_msg} | URL: {active_url}"
 
@@ -1121,9 +1229,12 @@ class ApiManager:
                             if any(k in err_json for k in ["message", "type", "code", "param"]):
                                 err_msg = json.dumps(err_json, ensure_ascii=False)
 
-                                if mode == "generic" and self._should_fallback_to_images_api(err_msg, bool(images)):
+                                if interface_mode == "openai_chat" and self._should_fallback_to_images_api(err_msg, bool(images)):
                                     logger.info(f"模型 {model} 返回顶层错误结构，自动回退到 Images API")
-                                    return await self.call_images_api(images, prompt, model, key, base, proxy)
+                                    return await self.call_images_api(
+                                        images, prompt, model, key, base, proxy,
+                                        generation_params=generation_params
+                                    )
 
                                 return f"API Error {resp.status}: {err_msg} | URL: {active_url}"
                         except:
@@ -1137,9 +1248,12 @@ class ApiManager:
                                 )
                             return f"HTTP {resp.status}: 服务端返回了网页而非数据，请检查URL配置。"
 
-                        if mode == "generic" and self._should_fallback_to_images_api(resp_text, bool(images)):
+                        if interface_mode == "openai_chat" and self._should_fallback_to_images_api(resp_text, bool(images)):
                             logger.info(f"模型 {model} 当前错误适合切换到 Images API，自动回退处理")
-                            return await self.call_images_api(images, prompt, model, key, base, proxy)
+                            return await self.call_images_api(
+                                images, prompt, model, key, base, proxy,
+                                generation_params=generation_params
+                            )
 
                         return f"HTTP {resp.status}: {resp_text[:200]} | URL: {active_url}"
 

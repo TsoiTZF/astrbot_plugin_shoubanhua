@@ -1,4 +1,28 @@
 {
+    "interface_mode": {
+        "description": "接口模式",
+        "type": "string",
+        "options": [
+            "openai_image",
+            "openai_chat",
+            "gemini_official",
+            "custom_endpoint"
+        ],
+        "hint": "openai_image 适合标准图片接口；openai_chat 适合会返回图片链接的 chat/completions 中转站；gemini_official 使用 Google Gemini 官方 generateContent；custom_endpoint 为自定义完整路径，只请求你填写的完整 URL，不会追加 /v1、/images/generations 或 /chat/completions。",
+        "default": "openai_image"
+    },
+    "base_url": {
+        "description": "接口地址",
+        "type": "string",
+        "hint": "标准/对话模式通常填写 https://api.example.com/v1；Gemini 官方模式可留空或填写 https://generativelanguage.googleapis.com/v1beta；自定义模式必须填写完整请求路径，例如 https://api.example.com/v1/images/generations。留空时兼容读取旧版 generic_api_url / gemini_api_url。",
+        "default": ""
+    },
+    "api_keys": {
+        "description": "API Keys",
+        "type": "text",
+        "hint": "可填写一个或多个 key，多个 key 建议按行填写。留空时兼容读取旧版 generic_api_keys / gemini_api_keys。",
+        "default": ""
+    },
     "generic_api_url": {
         "description": "【Generic】API基础地址",
         "type": "string",
@@ -32,9 +56,9 @@
         "default": []
     },
     "api_mode": {
-        "description": "【核心】API 协议模式",
+        "description": "【旧版兼容】API 协议模式",
         "type": "string",
-        "hint": "Generic使用OpenAI通用格式；Gemini_Official使用谷歌官方格式。切换模式后，管理指令会自动操作对应的Key池。",
+        "hint": "仅用于兼容旧配置。新配置请使用顶部的 interface_mode、base_url、api_keys。",
         "default": "generic",
         "options": [
             "generic",
@@ -102,6 +126,24 @@
             "1K",
             "2K",
             "4K"
+        ]
+    },
+    "image_aspect_ratio": {
+        "description": "【画面】文生图默认比例",
+        "type": "string",
+        "hint": "提示词没有写比例时使用。文生图默认 4:3；图生图会优先读取上传图片尺寸并自动匹配最接近的常规比例。",
+        "default": "4:3",
+        "options": [
+            "1:1",
+            "16:9",
+            "9:16",
+            "5:4",
+            "4:5",
+            "4:3",
+            "3:4",
+            "3:2",
+            "2:3",
+            "21:9"
         ]
     },
     "enable_luxury_mode": {
@@ -195,7 +237,7 @@
         "type": "text",
         "editor_mode": true,
         "editor_language": "markdown",
-        "default": "🎨 手办化Pro插件使用帮助：\n\n📌 基础命令：\n#手办化 [图片] - 生成标准手办化图片\n#Q版化 [图片] - 生成Q版手办化图片\n#痛屋化 [图片] - 生成痛屋场景图片\n#痛车化 [图片] - 生成痛车场景图片\n#cos化 [图片] - 生成cosplay照片\n#cos自拍 [图片] - 生成cosplay自拍\n#孤独的我 [图片] - 生成孤独场景图片\n\n📌 数字版本：\n#手办化2 [图片] - 手办化版本2\n#手办化3 [图片] - 手办化版本3\n#手办化4 [图片] - 手办化版本4\n#手办化5 [图片] - 手办化版本5\n#手办化6 [图片] - 手办化版本6\n\n📌 新增命令：\n#第三视角 [图片] - 生成第三人称视角场景\n#痛屋化2 [图片] - 生成改良版痛屋场景\n#鬼图 [图片] - 生成灵异鬼图风格照片\n#第一视角 [图片] - 生成第一人称视角场景\n\n📌 预设管理：\n#lm列表 - 查看所有可用预设\n#lm查看 <关键词> - 查看预设提示词\n#lm添加 <关键词>:<提示词> - 添加/修改预设\n#lm删除 <关键词> - 删除自定义预设\n\n📌 统计与查询：\n#手办化查询次数 - 查询剩余次数\n#手办化今日统计 - (管理员)查看今日消耗\n\n📌 管理命令(管理员)：\n#手办化添加key <key> - 添加Key到当前模式\n#手办化key列表 - 查看当前模式Key池\n#切换API模式 generic/gemini_official\n#切换模型 - 查看或切换模型\n\n📌 使用方式：\n1. 发送图片并使用命令\n2. 引用含有图片的消息并使用命令\n3. @某人使用命令（将使用该人的头像）\n4. #bnn <提示词> (自动识别文生图/图生图)"
+        "default": "🎨 手办化Pro插件使用帮助：\n\n📌 基础命令：\n#手办化 [图片] - 生成标准手办化图片\n#Q版化 [图片] - 生成Q版手办化图片\n#痛屋化 [图片] - 生成痛屋场景图片\n#痛车化 [图片] - 生成痛车场景图片\n#cos化 [图片] - 生成cosplay照片\n#cos自拍 [图片] - 生成cosplay自拍\n#孤独的我 [图片] - 生成孤独场景图片\n\n📌 数字版本：\n#手办化2 [图片] - 手办化版本2\n#手办化3 [图片] - 手办化版本3\n#手办化4 [图片] - 手办化版本4\n#手办化5 [图片] - 手办化版本5\n#手办化6 [图片] - 手办化版本6\n\n📌 新增命令：\n#第三视角 [图片] - 生成第三人称视角场景\n#痛屋化2 [图片] - 生成改良版痛屋场景\n#鬼图 [图片] - 生成灵异鬼图风格照片\n#第一视角 [图片] - 生成第一人称视角场景\n\n📌 预设管理：\n#lm列表 - 查看所有可用预设\n#lm查看 <关键词> - 查看预设提示词\n#lm添加 <关键词>:<提示词> - 添加/修改预设\n#lm删除 <关键词> - 删除自定义预设\n\n📌 统计与查询：\n#手办化查询次数 - 查询剩余次数\n#手办化今日统计 - (管理员)查看今日消耗\n\n📌 管理命令(管理员)：\n#手办化添加key <key> - 添加Key到当前模式\n#手办化key列表 - 查看当前模式Key池\n#切换API模式 openai_image/openai_chat/gemini_official/custom_endpoint\n#切换模型 - 查看或切换模型\n\n📌 使用方式：\n1. 发送图片并使用命令\n2. 引用含有图片的消息并使用命令\n3. @某人使用命令（将使用该人的头像）\n4. #bnn <提示词> (自动识别文生图/图生图)"
     },
     "generating_msg_template": {
         "description": "【显示】生成过程提示文案",

@@ -103,7 +103,7 @@ _CLOTHING_KEYWORDS = [
     "astrbot_plugin_shoubanhua",
     "shskjw",
     "支持第三方所有OpenAI绘图格式和原生Google Gemini 终极缝合怪，文生图/图生图插件，支持LLM智能判断",
-    "2.8.4",
+    "2.9.0",
     "https://github.com/shskjw/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
@@ -124,6 +124,9 @@ class FigurineProPlugin(Star):
         "text_to_image_model",
         "text_to_image_api_url",
         "text_to_image_api_keys",
+        "interface_mode",
+        "base_url",
+        "api_keys",
         "api_mode",
         "prompt_list",
         "generic_api_url",
@@ -138,6 +141,7 @@ class FigurineProPlugin(Star):
     _LEGACY_DYNAMIC_RESTORE_KEYS = {
         "model",
         "text_to_image_model",
+        "interface_mode",
         "api_mode",
         "prompt_list",
         "generic_api_keys",
@@ -147,6 +151,8 @@ class FigurineProPlugin(Star):
     _COMMAND_PRIORITY_DYNAMIC_KEYS = {
         "model",
         "text_to_image_model",
+        "interface_mode",
+        "api_keys",
         "api_mode",
         "prompt_list",
     }
@@ -154,6 +160,7 @@ class FigurineProPlugin(Star):
         "generic_api_url",
         "gemini_api_url",
         "text_to_image_api_url",
+        "base_url",
     }
 
     def __init__(self, context: Context, config: AstrBotConfig):
@@ -854,7 +861,9 @@ class FigurineProPlugin(Star):
 
         await self.data_mgr.initialize()
         self.img_mgr.schedule_default_font_install(self.data_mgr.data_dir)
-        if not self.conf.get("generic_api_keys") and not self.conf.get("gemini_api_keys"):
+        if (not self.api_mgr._normalize_keys(self.conf.get("api_keys"))
+                and not self.api_mgr._normalize_keys(self.conf.get("generic_api_keys"))
+                and not self.api_mgr._normalize_keys(self.conf.get("gemini_api_keys"))):
             logger.warning("FigurinePro: 未配置任何 API Key")
 
         auto_detect_status = "已启用" if self._llm_auto_detect else "未启用"
@@ -2330,7 +2339,8 @@ class FigurineProPlugin(Star):
                                    prompt: str, preset_name: str, deduction: dict, uid: str, gid: str, cost: int,
                                    extra_rules: str = "", model_override: str = "", hide_text: bool = False,
                                    charge_quota: bool = True, use_text_to_image_api: bool = False,
-                                   suppress_user_error: bool = False) -> Tuple[bool, str]:
+                                   suppress_user_error: bool = False,
+                                   aspect_ratio: str = None, resolution: str = None) -> Tuple[bool, str]:
         """
         后台执行生成任务，并在完成后主动发送消息。
 
@@ -2365,7 +2375,8 @@ class FigurineProPlugin(Star):
             for attempt in range(2):
                 res = await self.api_mgr.call_api(
                     images, prompt, model, False, self.img_mgr.proxy,
-                    use_text_to_image_api=use_text_to_image_api
+                    use_text_to_image_api=use_text_to_image_api,
+                    aspect_ratio=aspect_ratio, resolution=resolution
                 )
                 if isinstance(res, bytes) or not self._is_transient_generation_error(res) or attempt == 1:
                     break
@@ -2432,7 +2443,8 @@ class FigurineProPlugin(Star):
     async def _run_batch_text_to_image(self, event: AstrMessageEvent, prompt: str, preset_name: str,
                                        deduction: dict, uid: str, gid: str, count: int,
                                        extra_rules: str = "", hide_text: bool = False,
-                                       suppress_user_error: bool = False) -> Dict[str, Any]:
+                                       suppress_user_error: bool = False,
+                                       aspect_ratio: str = None, resolution: str = None) -> Dict[str, Any]:
         """
         批量文生图后台任务
 
@@ -2484,7 +2496,8 @@ class FigurineProPlugin(Star):
                             start_time = datetime.now()
                             res = await self.api_mgr.call_api(
                                 images, prompt, model, False, self.img_mgr.proxy,
-                                use_text_to_image_api=True
+                                use_text_to_image_api=True,
+                                aspect_ratio=aspect_ratio, resolution=resolution
                             )
 
                             if isinstance(res, bytes):
@@ -2782,7 +2795,8 @@ class FigurineProPlugin(Star):
             return "【用户身份】普通用户。请按照你的正常人设和性格来回复；如果启用了叛逆模式，可以自然地带一点傲娇、调侃或小脾气，但不要像流程化应答。"
 
     @filter.llm_tool(name="shoubanhua_draw_image")
-    async def text_to_image_tool(self, event: AstrMessageEvent, prompt: str, count: int = 1):
+    async def text_to_image_tool(self, event: AstrMessageEvent, prompt: str, count: int = 1,
+                                 aspect_ratio: str = "auto", resolution: str = "auto"):
         '''根据文本描述生成图片（文生图）。
 
         【排他性条件（极度重要！）】
@@ -2802,9 +2816,15 @@ class FigurineProPlugin(Star):
         调用此工具后，系统会自动返回用户的身份（VIP或普通）。
         你不需要提前调用 check_user_status_tool，直接调用本工具即可。
 
+        【画面参数】
+        - 用户写了比例或 1K/2K/4K 时，可传入对应参数；不确定时保持 auto，插件会直接从 prompt 识别。
+        - 用户没写时不要擅自猜测：文生图会使用后台配置的默认比例和分辨率。
+
         Args:
             prompt(string): 图片生成的提示词，可以是预设名+追加规则。
             count(int): 生成图片的数量，默认1张，最大10张。当用户要求"多来点"时设置为3张。
+            aspect_ratio(string): 图片宽高比。默认 auto，会从 prompt 自动识别；也可显式传 1:1、16:9、9:16、5:4、4:5、4:3、3:4、3:2、2:3、21:9。
+            resolution(string): 图片清晰度。默认 auto，会从 prompt 自动识别 1K、2K、4K；也可显式传对应值。
         '''
         # 0. 检查 LLM 工具开关
         if not self._get_conf_bool("enable_llm_tool", True):
@@ -2837,6 +2857,8 @@ class FigurineProPlugin(Star):
 
         # 1. 计算预设和追加规则
         final_prompt, preset_name, extra_rules = self._process_prompt_and_preset(prompt)
+        requested_aspect_ratio = None if str(aspect_ratio).strip().lower() in {"", "auto"} else aspect_ratio
+        requested_resolution = None if str(resolution).strip().lower() in {"", "auto"} else resolution
 
         # 根据配置决定是否隐藏进度提示（白名单用户和普通用户使用同一开关）
         show_llm_progress = self._get_conf_bool("llm_show_progress", True)
@@ -2873,7 +2895,8 @@ class FigurineProPlugin(Star):
                 event, [], final_prompt, preset_name, deduction, uid, gid, total_cost,
                 extra_rules,
                 model_override=self._get_text_to_image_model(), hide_text=hide_llm_result_text,
-                use_text_to_image_api=True, suppress_user_error=True
+                use_text_to_image_api=True, suppress_user_error=True,
+                aspect_ratio=requested_aspect_ratio, resolution=requested_resolution
             )
             total_success = 1 if success else 0
             total_fail = 0 if success else 1
@@ -2881,7 +2904,8 @@ class FigurineProPlugin(Star):
         else:
             batch_result = await self._run_batch_text_to_image(
                 event, final_prompt, preset_name, deduction, uid, gid, count, extra_rules,
-                hide_llm_result_text, suppress_user_error=True
+                hide_llm_result_text, suppress_user_error=True,
+                aspect_ratio=requested_aspect_ratio, resolution=requested_resolution
             )
             total_success = int(batch_result.get("success", 0))
             total_fail = int(batch_result.get("fail", 0))
@@ -3535,13 +3559,19 @@ class FigurineProPlugin(Star):
     @filter.command("切换API模式", prefix_optional=True)
     async def on_switch_mode(self, event: AstrMessageEvent, ctx=None):
         if not self.is_admin(event): return
-        mode = event.message_str.split()[-1]
-        if mode in ["generic", "gemini_official"]:
-            self.conf["api_mode"] = mode;
-            self._save_config(["api_mode"])
+        mode = event.message_str.split()[-1].strip().lower()
+        aliases = {"generic": "openai_chat"}
+        mode = aliases.get(mode, mode)
+        if mode in ["openai_image", "openai_chat", "gemini_official", "custom_endpoint"]:
+            self.conf["interface_mode"] = mode
+            # 同步旧字段，方便旧版插件回滚后仍能读取。
+            self.conf["api_mode"] = "gemini_official" if mode == "gemini_official" else "generic"
+            self._save_config(["interface_mode", "api_mode"])
             yield event.chain_result([Plain(f"✅ 已切换为 {mode}")])
         else:
-            yield event.chain_result([Plain("模式无效 (generic / gemini_official)")])
+            yield event.chain_result([Plain(
+                "模式无效 (openai_image / openai_chat / gemini_official / custom_endpoint)"
+            )])
 
     @filter.command("切换模型", prefix_optional=True)
     async def on_switch_model(self, event: AstrMessageEvent, ctx=None):
@@ -3666,25 +3696,21 @@ class FigurineProPlugin(Star):
 
         keys = parts[1:]
 
-        mode = self.conf.get("api_mode", "generic")
-        if mode == "gemini_official":
-            field = "gemini_api_keys"
-        else:
-            field = "generic_api_keys"
-
-        curr_keys = self.conf.get(field, [])
+        field = "api_keys"
+        curr_keys = self.api_mgr._normalize_keys(self.conf.get(field, []))
         curr_keys.extend(keys)
-        self.conf[field] = curr_keys;
+        self.conf[field] = "\n".join(curr_keys)
         self._save_config([field])
         yield event.chain_result([Plain(f"✅ 已向 {field} 添加 {len(keys)} 个 Key")])
 
     @filter.command("手办化key列表", prefix_optional=True)
     async def on_list_keys(self, event: AstrMessageEvent, ctx=None):
         if not self.is_admin(event): return
-        mode = self.conf.get("api_mode", "generic")
-        base = "gemini" if mode == "gemini_official" else "generic"
-
-        nk = self.conf.get(f"{base}_api_keys", [])
+        mode = self.conf.get("interface_mode", self.conf.get("api_mode", "openai_chat"))
+        nk = self.api_mgr._normalize_keys(self.conf.get("api_keys", []))
+        if not nk:
+            legacy_field = "gemini_api_keys" if mode == "gemini_official" else "generic_api_keys"
+            nk = self.api_mgr._normalize_keys(self.conf.get(legacy_field, []))
         msg = f"🔑 模式: {mode}\n📌 普通池 ({len(nk)}):\n" + "\n".join([f"{k[:8]}..." for k in nk])
         yield event.chain_result([Plain(msg)])
 
@@ -3696,20 +3722,25 @@ class FigurineProPlugin(Star):
 
         idx_str = parts[1]
 
-        mode = self.conf.get("api_mode", "generic")
-        base = "gemini" if mode == "gemini_official" else "generic"
-        field = f"{base}_api_keys"
+        mode = self.conf.get("interface_mode", self.conf.get("api_mode", "openai_chat"))
+        field = "api_keys"
+        store_as_text = True
+        if not self.api_mgr._normalize_keys(self.conf.get(field, [])):
+            legacy_field = "gemini_api_keys" if mode == "gemini_official" else "generic_api_keys"
+            if self.api_mgr._normalize_keys(self.conf.get(legacy_field, [])):
+                field = legacy_field
+                store_as_text = False
 
         if idx_str == "all":
-            self.conf[field] = [];
+            self.conf[field] = "" if store_as_text else []
             self._save_config([field])
             yield event.chain_result([Plain("✅ 已清空")])
         elif idx_str.isdigit():
-            keys = self.conf.get(field, [])
+            keys = self.api_mgr._normalize_keys(self.conf.get(field, []))
             idx = int(idx_str) - 1
             if 0 <= idx < len(keys):
                 keys.pop(idx);
-                self.conf[field] = keys;
+                self.conf[field] = "\n".join(keys) if store_as_text else keys
                 self._save_config([field])
                 yield event.chain_result([Plain("✅ 已删除")])
 
