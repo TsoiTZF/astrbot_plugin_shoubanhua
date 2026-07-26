@@ -8,13 +8,13 @@
             "gemini_official",
             "custom_endpoint"
         ],
-        "hint": "openai_image 适合标准图片接口；openai_chat 适合会返回图片链接的 chat/completions 中转站；gemini_official 使用 Google Gemini 官方 generateContent；custom_endpoint 为自定义完整路径，只请求你填写的完整 URL，不会追加 /v1、/images/generations 或 /chat/completions。",
+        "hint": "只需选择接口模式并填写一个基础 URL：openai_image 自动补全 /v1/images/...；openai_chat 自动补全 /v1/chat/completions；gemini_official 自动补全 /v1beta/models/...:generateContent。custom_endpoint 为自定义完整路径，不自动追加。",
         "default": "openai_image"
     },
     "base_url": {
         "description": "接口地址",
         "type": "string",
-        "hint": "标准/对话模式通常填写 https://api.example.com/v1；Gemini 官方模式可留空或填写 https://generativelanguage.googleapis.com/v1beta；自定义模式必须填写完整请求路径，例如 https://api.example.com/v1/images/generations。",
+        "hint": "非自定义模式只填写基础地址，例如 https://api.example.com 或 https://api.example.com/api，不需要填写 v1、v1beta 或具体接口路径；即使已填写也会自动忽略，并按所选接口模式重新补全。Gemini 官方模式可留空。custom_endpoint 模式必须填写完整请求路径。",
         "default": ""
     },
     "api_keys": {
@@ -62,7 +62,7 @@
     "text_to_image_api_url": {
         "description": "【通用】文生图专用接口地址",
         "type": "string",
-        "hint": "仅用于文生图功能的专用 API 基础地址。支持填写基础 URL（如 https://api.example.com 或 https://api.example.com/v1），插件会自动拼接 chat/completions、images/generations、images/edits 等路径；也兼容误填完整接口路径并自动修正。【非必填】留空时会自动回退使用当前模式下的普通 API 地址，不会导致文生图不可用。",
+        "hint": "仅用于文生图功能的专用 API 基础地址。只需填写 https://api.example.com 一类基础 URL，版本段和接口路径会被忽略，并按当前接口模式自动补全。【非必填】留空时自动使用统一接口地址。",
         "default": ""
     },
     "text_to_image_api_keys": {

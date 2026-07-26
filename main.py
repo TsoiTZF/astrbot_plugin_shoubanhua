@@ -16,7 +16,7 @@ from .data_manager import DataManager
 from .image_manager import ImageManager
 from .api_manager import ApiManager
 from .context_manager import ContextManager, LLMTaskAnalyzer
-from .utils import norm_id, extract_image_urls_from_text
+from .utils import extract_image_urls_from_text, norm_id, normalize_model_list
 
 # 内置叛逆词库 - 用于LLM判断时增加个性化回复
 # 注意：避免使用"画"字，因为人设拍照等场景不适合
@@ -871,7 +871,12 @@ class FigurineProPlugin(Star):
             f"FigurinePro 插件已加载 v2.5.5 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
 
     def is_admin(self, event: AstrMessageEvent) -> bool:
-        return event.get_sender_id() in self.context.get_config().get("admins_id", [])
+        sender_id = norm_id(event.get_sender_id())
+        context_config = self.context.get_config() or {}
+        admins = context_config.get("admins_id", []) or []
+        if isinstance(admins, str):
+            admins = re.split(r"[\r\n,]+", admins)
+        return bool(sender_id) and sender_id in {norm_id(admin_id) for admin_id in admins}
 
     def _get_bot_id(self, event: AstrMessageEvent) -> str:
         """获取机器人自身的 QQ/ID，用于过滤"""
@@ -3313,7 +3318,7 @@ class FigurineProPlugin(Star):
             model = self.conf.get("model", "nano-banana")
 
         if model_idx_override is not None:
-            all_models = [m if isinstance(m, str) else m["id"] for m in self.conf.get("model_list", [])]
+            all_models = normalize_model_list(self.conf.get("model_list", []))
             if 0 <= model_idx_override < len(all_models):
                 model = all_models[model_idx_override]
 
@@ -3577,15 +3582,21 @@ class FigurineProPlugin(Star):
     @filter.command("切换模型", prefix_optional=True)
     async def on_switch_model(self, event: AstrMessageEvent, ctx=None):
         if not self.is_admin(event):
+            yield event.chain_result([Plain("❌ 只有管理员可以切换模型。")])
             return
 
-        all_m = [m if isinstance(m, str) else m["id"] for m in self.conf.get("model_list", [])]
-        parts = event.message_str.split()
-        if len(parts) == 1:
+        all_m = normalize_model_list(self.conf.get("model_list", []))
+        parts = event.message_str.strip().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
             curr = self.conf.get("model", "nano-banana")
-            msg = "📋 可用模型:\n" + "\n".join([f"{i + 1}. {m} {'✅' if m == curr else ''}" for i, m in enumerate(all_m)])
+            if all_m:
+                msg = "📋 可用模型:\n" + "\n".join(
+                    [f"{i + 1}. {m} {'✅' if m == curr else ''}" for i, m in enumerate(all_m)]
+                )
+            else:
+                msg = f"📋 当前模型: {curr}\n模型列表为空，可直接输入模型名称切换。"
             msg += "\n\n💡 用法: #切换模型 <序号>\n或直接使用 #切换模型 <模型名称> 写入任意模型。"
-            yield event.chain_result([Plain(msg)]);
+            yield event.chain_result([Plain(msg)])
             return
 
         target = parts[1].strip()
@@ -3597,7 +3608,7 @@ class FigurineProPlugin(Star):
                 self._save_config(["model"])
                 yield event.chain_result([Plain(f"✅ 已切换为预设模型: {all_m[idx]}")])
             else:
-                yield event.chain_result([Plain("序号超出范围了")])
+                yield event.chain_result([Plain("❌ 模型序号超出范围，请先发送 #切换模型 查看列表。")])
         else:
             # 直接按名称写入任意模型
             self.conf["model"] = target

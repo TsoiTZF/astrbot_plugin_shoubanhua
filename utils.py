@@ -1,5 +1,9 @@
 import re
 from typing import Any, List
+from urllib.parse import urlsplit, urlunsplit
+
+
+_API_VERSION_SEGMENT = re.compile(r"^v\d+(?:(?:alpha|beta)\d*)?$", re.IGNORECASE)
 
 
 def norm_id(raw_id: Any) -> str:
@@ -7,6 +11,79 @@ def norm_id(raw_id: Any) -> str:
     if raw_id is None:
         return ""
     return str(raw_id).strip()
+
+
+def normalize_model_list(raw_models: Any) -> List[str]:
+    """兼容字符串列表和旧版字典模型配置，并跳过无效项。"""
+    if not isinstance(raw_models, (list, tuple, set)):
+        return []
+
+    models = []
+    for item in raw_models:
+        value = ""
+        if isinstance(item, str):
+            value = item
+        elif isinstance(item, dict):
+            value = item.get("id") or item.get("model") or item.get("name") or ""
+
+        value = str(value).strip()
+        if value and value not in models:
+            models.append(value)
+    return models
+
+
+def normalize_api_root(raw_url: Any) -> str:
+    """提取 API 基础地址，忽略用户填写的版本段和已拼接接口路径。
+
+    例如：
+    - https://api.example.com/v1 -> https://api.example.com
+    - https://api.example.com/api/v1beta/models/x:generateContent -> https://api.example.com/api
+    - https://api.example.com/openai/v1/chat/completions -> https://api.example.com/openai
+    """
+    url = str(raw_url or "").strip().rstrip("/")
+    if not url:
+        return ""
+
+    parsed = urlsplit(url)
+    if not parsed.scheme or not parsed.netloc:
+        # 配置项正常应为绝对 URL；这里仍对异常输入做保守的字符串清理。
+        clean = re.split(r"[?#]", url, maxsplit=1)[0].rstrip("/")
+        clean = re.sub(
+            r"/(?:v\d+(?:(?:alpha|beta)\d*)?)(?:/.*)?$",
+            "",
+            clean,
+            flags=re.IGNORECASE,
+        )
+        clean = re.sub(
+            r"/(?:chat/completions|images/(?:generations|edits)|models(?:/.*)?)$",
+            "",
+            clean,
+            flags=re.IGNORECASE,
+        )
+        return clean.rstrip("/")
+
+    segments = [segment for segment in parsed.path.split("/") if segment]
+    cut_at = len(segments)
+
+    for index, segment in enumerate(segments):
+        lower_segment = segment.lower()
+        if _API_VERSION_SEGMENT.fullmatch(segment):
+            cut_at = index
+            break
+        if lower_segment == "models":
+            cut_at = index
+            break
+        if lower_segment == "chat" and index + 1 < len(segments) and segments[index + 1].lower() == "completions":
+            cut_at = index
+            break
+        if lower_segment == "images" and index + 1 < len(segments) and segments[index + 1].lower() in {
+            "generations", "edits"
+        }:
+            cut_at = index
+            break
+
+    root_path = "/" + "/".join(segments[:cut_at]) if cut_at else ""
+    return urlunsplit((parsed.scheme, parsed.netloc, root_path.rstrip("/"), "", "")).rstrip("/")
 
 
 def extract_image_urls_from_text(text: str) -> List[str]:

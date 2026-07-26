@@ -1,6 +1,7 @@
 # 不会用仔细看文档 所有功能指令下面都列出来了
 ## 🆕 新增功能
 # 不会用进群 460973561
+推荐香蕉（nano-banana谷歌最强生图模型系列）以及gpt-image-2（支持4K）中转站：**[Meinianda AI](https://meinianda.top)**
 - 不会写文档写的可能不清楚可以进群咨询
 ### 叛逆模式 (Rebellious Mode)
 - 新增Bot叛逆人格功能，让Bot回复更有个性
@@ -163,7 +164,7 @@
 | --- | --- | --- |
 | `text_to_image_model` | 文生图专用模型ID，留空使用默认模型 | 空 |
 | `interface_mode` | 接口模式：openai_image / openai_chat / gemini_official / custom_endpoint | openai_image |
-| `base_url` | 统一接口地址；custom_endpoint 模式必须填写完整请求路径 | 空 |
+| `base_url` | 统一基础地址；无需填写 v1/v1beta，按模式自动补全；custom_endpoint 填完整路径 | 空 |
 | `api_keys` | 统一 API Key，多条按行填写 | 空 |
 | `image_resolution` | 提示词未指定时使用的默认分辨率 | 1K |
 | `image_aspect_ratio` | 文生图未指定时使用的默认比例；图生图会自动读取原图比例 | 4:3 |
@@ -221,10 +222,10 @@
 | 配置项 | 说明 |
 | --- | --- |
 | `interface_mode` | `openai_image` 标准图片接口；`openai_chat` 对话中转；`gemini_official` Gemini 官方；`custom_endpoint` 自定义完整路径 |
-| `base_url` | 统一接口地址；自定义模式下不会自动追加任何路径 |
+| `base_url` | 统一基础地址；OpenAI/Gemini 模式会忽略已填的 v1/v1beta 和接口尾部，再按模式自动补全；自定义模式不追加路径 |
 | `api_keys` | 统一 Key 池，支持按行填写多个 Key |
 | `model_list` | 可用模型 ID 列表，默认包含 nano-banana 等 |
-| `model` | 默认模型（需在模型列表中存在），示例：gemini-2.5-flash-preview-image |
+| `model` | 默认模型，可直接填写任意模型名称，无需存在于模型列表中 |
 | `image_resolution` | 画质/分辨率参数，例：4K |
 | `image_aspect_ratio` | 文生图默认比例，默认 4:3；图生图未指定比例时自动跟随原图常规比例 |
 | `show_model_info` | 是否在成功/失败消息中显示实际调用模型 |

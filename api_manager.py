@@ -4,12 +4,14 @@ import ipaddress
 import json
 import re
 import socket
+from urllib.parse import quote
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 import aiohttp
 from typing import List, Dict
 from astrbot import logger
 from .generation_params import detect_aspect_ratio_from_image, resolve_image_generation_params
+from .utils import normalize_api_root
 
 
 class ApiManager:
@@ -199,7 +201,7 @@ class ApiManager:
 
         if mode == "gemini_official":
             legacy_url = str(self.config.get("gemini_api_url", "") or "").strip()
-            return legacy_url or "https://generativelanguage.googleapis.com/v1beta"
+            return legacy_url or "https://generativelanguage.googleapis.com"
         return str(self.config.get("generic_api_url", "") or "").strip()
 
     async def get_key(self, mode: str, use_text_to_image_api: bool = False) -> str | None:
@@ -415,112 +417,45 @@ class ApiManager:
         return 'image/png' # 默认
 
     def _normalize_generic_chat_url(self, base_url: str) -> str:
-        """将用户填写的 Generic URL 规范化为 chat/completions 地址。
-        支持只填写域名或 /v1；如果用户误填了完整接口路径，也会自动忽略尾部路径后重新拼接。
-        """
-        original_url = (base_url or "").rstrip("/")
-        url = original_url
-        if not url:
-            return url
+        """忽略用户填写的版本/接口尾部，按 OpenAI Chat 模式统一补全。"""
+        original_url = str(base_url or "").strip().rstrip("/")
+        root = normalize_api_root(original_url)
+        if not root:
+            return ""
 
-        # 若用户直接填了完整接口路径，统一裁掉尾部，改按基础 URL 重新拼接
-        known_suffixes = [
-            "/v1/chat/completions",
-            "/chat/completions",
-            "/v1/images/generations",
-            "/images/generations",
-            "/v1/images/edits",
-            "/images/edits"
-        ]
-        lower_url = url.lower()
-        for suffix in known_suffixes:
-            if lower_url.endswith(suffix):
-                url = url[: -len(suffix)].rstrip("/")
-                lower_url = url.lower()
-                logger.info(f"检测到 Generic API 地址包含完整接口路径，已自动忽略尾部路径并改为基础 URL: {url}")
-                break
-
-        if url.endswith("/v1"):
-            normalized = f"{url}/chat/completions"
-        elif "/v1/" in url:
-            idx = lower_url.find("/v1") + 3
-            normalized = f"{url[:idx]}/chat/completions"
-        else:
-            normalized = f"{url}/v1/chat/completions"
-
-        if normalized.rstrip("/") != original_url.rstrip("/"):
+        normalized = f"{root}/v1/chat/completions"
+        if normalized != original_url:
             logger.info(f"Generic API 地址已规范化为: {normalized}")
-
         return normalized
 
     def _convert_to_images_api_url(self, chat_url: str, has_input_image: bool = False) -> str:
-        """将 Generic Base URL / chat URL 转换为图片接口 URL；有输入图时优先使用 edits"""
-        url = self._normalize_generic_chat_url(chat_url)
+        """忽略用户填写的版本/接口尾部，按 OpenAI Images 模式统一补全。"""
+        root = normalize_api_root(chat_url)
+        if not root:
+            return ""
         endpoint = "images/edits" if has_input_image else "images/generations"
-        if "chat/completions" in url:
-            return url.replace("chat/completions", endpoint)
-        elif url.endswith("/v1"):
-            return f"{url}/{endpoint}"
-        elif "/v1" in url:
-            idx = url.find("/v1") + 3
-            return f"{url[:idx]}/{endpoint}"
-        return f"{url}/v1/{endpoint}"
+        return f"{root}/v1/{endpoint}"
+
+    def _build_gemini_api_url(self, base_url: str, model: str) -> str:
+        """忽略用户填写的版本/接口尾部，按 Gemini 官方模式统一补全。"""
+        root = normalize_api_root(base_url)
+        if not root:
+            return ""
+
+        model_id = str(model or "").strip()
+        if model_id.lower().startswith("models/"):
+            model_id = model_id.split("/", 1)[1]
+        return f"{root}/v1beta/models/{quote(model_id, safe='-._~')}:generateContent"
 
     def _build_candidate_generic_chat_urls(self, base_url: str) -> List[str]:
-        """基于用户填写的基础地址，构造一组常见 Generic API 候选地址"""
-        candidates = []
+        """按所选 OpenAI Chat 模式构造唯一请求地址。"""
         normalized = self._normalize_generic_chat_url(base_url)
-        if normalized:
-            candidates.append(normalized)
-
-        raw = (base_url or "").rstrip("/")
-        if not raw:
-            return candidates
-
-        lower_raw = raw.lower()
-
-        # 仅当用户填的像网站首页/域名，且未包含 v1 或 chat 路径时，才尝试常见前缀
-        if "/v1" not in lower_raw and "chat/completions" not in lower_raw:
-            extra_prefixes = [
-                "/api/v1",
-                "/openai/v1",
-                "/api/openai/v1",
-                "/v1"
-            ]
-            for prefix in extra_prefixes:
-                candidate = f"{raw}{prefix}/chat/completions"
-                if candidate not in candidates:
-                    candidates.append(candidate)
-
-        return candidates
+        return [normalized] if normalized else []
 
     def _build_candidate_generic_image_urls(self, base_url: str, has_input_image: bool = False) -> List[str]:
-        """基于用户填写的基础地址，构造一组常见 Images API 候选地址"""
-        candidates = []
+        """按所选 OpenAI Images 模式构造唯一请求地址。"""
         normalized = self._convert_to_images_api_url(base_url, has_input_image=has_input_image)
-        if normalized:
-            candidates.append(normalized)
-
-        raw = (base_url or "").rstrip("/")
-        if not raw:
-            return candidates
-
-        lower_raw = raw.lower()
-        endpoint = "images/edits" if has_input_image else "images/generations"
-
-        if "/v1" not in lower_raw and "images/generations" not in lower_raw and "images/edits" not in lower_raw:
-            extra_prefixes = [
-                "/api/v1",
-                "/openai/v1",
-                "/api/openai/v1",
-                "/v1"
-            ]
-            for prefix in extra_prefixes:
-                candidate = f"{raw}{prefix}/{endpoint}"
-                if candidate not in candidates:
-                    candidates.append(candidate)
-
-        return candidates
+        return [normalized] if normalized else []
 
     def _should_retry_images_api_with_multipart(self, error_msg: str, has_input_image: bool = False) -> bool:
         """判断 Images API 是否需要回退为 multipart/form-data 方式"""
@@ -1088,30 +1023,11 @@ class ApiManager:
         final_prompt = f"(Masterpiece, Best Quality, {res_set} Resolution), {prompt}" if res_set != "1K" else prompt
 
         if mode == "gemini_official":
-            # --- 修复核心：Gemini URL 智能构造 ---
-            # 如果 URL 里没有 'models' 关键字且不是 OneAPI 风格，说明填的是 Base URL
             if interface_mode != "custom_endpoint":
-                # 补全 v1/v1beta
-                if "/v1" not in url and "/v1beta" not in url:
-                    url += "/v1beta"
-
-                # 补全 /models
-                if "/models" not in url:
-                    url += "/models"
-
-                # 拼接 Model (防止 url 中已经包含了 model)
-                if f"/{model}" not in url:
-                    url += f"/{model}"
-
-                # 拼接动作
-                if ":generateContent" not in url:
-                    url += ":generateContent"
-
-                # 认证：Query 参数 + Header 双重保险
-                if "?" in url:
-                    url += f"&key={key}"
-                else:
-                    url += f"?key={key}"
+                # 无论用户填了域名、v1、v1beta 还是完整接口路径，都先还原为基础地址，
+                # 再由 gemini_official 模式统一补全官方 v1beta generateContent 路径。
+                url = self._build_gemini_api_url(url, model)
+                logger.info(f"Gemini API 地址已按接口模式规范化为: {url}")
             headers["x-goog-api-key"] = key
 
             parts = [{"text": final_prompt}]
