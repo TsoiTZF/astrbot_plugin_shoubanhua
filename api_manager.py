@@ -8,13 +8,31 @@ from urllib.parse import quote
 from urllib.parse import urljoin
 from urllib.parse import urlparse
 import aiohttp
-from typing import List, Dict
+from typing import Any, List, Dict
 from astrbot import logger
 from .generation_params import detect_aspect_ratio_from_image, resolve_image_generation_params
 from .utils import normalize_api_root
 
 
 class ApiManager:
+    _PROVIDER_FINGERPRINT_KEYS = (
+        "interface_mode",
+        "api_mode",
+        "base_url",
+        "api_keys",
+        "generic_prefer_images_api",
+        "use_stream",
+        "timeout",
+        "enable_luxury_mode",
+        "luxury_request_count",
+        "image_resolution",
+        "image_aspect_ratio",
+        "result_image_download_timeout",
+        "result_image_download_retries",
+        "result_image_user_agent",
+    )
+    _AUTO_PROVIDER_ALIASES = {"auto", "自动", "默认", "重置"}
+
     def __init__(self, config: dict):
         self.config = config
         self.key_lock = asyncio.Lock()
@@ -24,6 +42,8 @@ class ApiManager:
         self._session = None # 保持 Session 持久化，复用 TCP/SSL 连接
         self._last_metrics = {}
         self._last_download_metrics = {}
+        self._provider_managers: Dict[int, tuple[str, "ApiManager"]] = {}
+        self._provider_manager_lock = asyncio.Lock()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -45,6 +65,309 @@ class ApiManager:
 
     def get_last_metrics(self) -> Dict:
         return dict(self._last_metrics or {})
+
+    async def close(self) -> None:
+        """关闭当前管理器及所有提供商子管理器持有的 HTTP 会话。"""
+        async with self._provider_manager_lock:
+            managers = [manager for _, manager in self._provider_managers.values()]
+            self._provider_managers.clear()
+
+        for manager in managers:
+            await manager.close()
+
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
+
+    @staticmethod
+    def _normalize_provider_name(provider: Dict[str, Any], index: int) -> str:
+        name = str(
+            provider.get("_provider_display_name")
+            or provider.get("name")
+            or provider.get("provider_name")
+            or ""
+        ).strip()
+        return name or f"提供商 {index + 1}"
+
+    @classmethod
+    def _is_auto_provider_selector(cls, selector: str) -> bool:
+        return not selector or selector.lower() in cls._AUTO_PROVIDER_ALIASES
+
+    @classmethod
+    def _parse_provider_index_selector(cls, selector: str) -> int | None:
+        text = str(selector or "").strip()
+        if text.startswith("#") and text[1:].isdigit():
+            return int(text[1:]) - 1
+        if text.isdigit():
+            return int(text) - 1
+        return None
+
+    def _annotate_provider(self, item: Dict[str, Any], source_index: int) -> Dict[str, Any]:
+        provider = dict(item)
+        provider["_provider_display_name"] = self._normalize_provider_name(item, source_index)
+        provider["_provider_source_index"] = source_index
+        return provider
+
+    def _iter_configured_providers(self) -> List[Dict[str, Any]]:
+        raw_providers = self.config.get("model_providers", [])
+        if not isinstance(raw_providers, list):
+            return []
+        return [
+            self._annotate_provider(item, source_index)
+            for source_index, item in enumerate(raw_providers)
+            if isinstance(item, dict)
+        ]
+
+    def _get_enabled_providers(self) -> List[Dict[str, Any]]:
+        """读取启用项，并让指令选中的提供商成为本轮回退起点。"""
+        providers = [
+            provider
+            for provider in self._iter_configured_providers()
+            if provider.get("enabled", True) is not False
+        ]
+
+        active_provider = str(self.config.get("active_provider") or "").strip()
+        if self._is_auto_provider_selector(active_provider):
+            return providers
+
+        selected = self._resolve_active_provider(providers, active_provider)
+        if selected is None:
+            logger.warning(
+                f"指定模型提供商 {active_provider} 不存在或已停用，本次按面板顺序调用"
+            )
+            return providers
+
+        active_index = next(
+            (
+                index
+                for index, provider in enumerate(providers)
+                if provider.get("_provider_source_index") == selected.get("_provider_source_index")
+            ),
+            None,
+        )
+        if active_index is None:
+            return providers
+        return providers[active_index:] + providers[:active_index]
+
+    def _resolve_active_provider(
+        self, providers: List[Dict[str, Any]], selector: str
+    ) -> Dict[str, Any] | None:
+        """按源序号或唯一名称定位启用项，重名时只接受序号。"""
+        source_index = self._parse_provider_index_selector(selector)
+        if source_index is not None:
+            return next(
+                (
+                    provider
+                    for provider in providers
+                    if provider.get("_provider_source_index") == source_index
+                ),
+                None,
+            )
+
+        matches = [
+            provider
+            for provider in providers
+            if self._normalize_provider_name(
+                provider, int(provider.get("_provider_source_index", 0))
+            ) == selector
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def _build_provider_config(self, provider: Dict[str, Any]) -> Dict[str, Any]:
+        """将单个提供商覆盖到全局网络与生成配置上。"""
+        provider_config = dict(self.config)
+        provider_config.pop("model_providers", None)
+
+        field_map = {
+            "interface_mode": "interface_mode",
+            "base_url": "base_url",
+            "api_keys": "api_keys",
+            "prefer_images_api": "generic_prefer_images_api",
+            "use_stream": "use_stream",
+        }
+        for source_key, target_key in field_map.items():
+            if source_key in provider:
+                provider_config[target_key] = provider.get(source_key)
+
+        # 提供商使用统一地址和 Key，避免旧版专用字段意外覆盖当前项。
+        provider_config["text_to_image_api_url"] = ""
+        provider_config["text_to_image_api_keys"] = []
+        provider_config["generic_api_url"] = ""
+        provider_config["generic_api_keys"] = []
+        provider_config["gemini_api_url"] = ""
+        provider_config["gemini_api_keys"] = []
+        provider_config.pop("active_provider", None)
+        return provider_config
+
+    @classmethod
+    def _provider_fingerprint(cls, provider_config: Dict[str, Any]) -> str:
+        """只对影响连接复用的字段生成进程内缓存指纹，不写入日志。"""
+        fingerprint = {
+            key: provider_config.get(key)
+            for key in cls._PROVIDER_FINGERPRINT_KEYS
+        }
+        fingerprint["api_keys"] = cls._normalize_keys(fingerprint.get("api_keys"))
+        return json.dumps(fingerprint, ensure_ascii=False, sort_keys=True, default=str)
+
+    def _get_provider_cache_key(self, provider: Dict[str, Any], fallback_index: int) -> int:
+        source_index = provider.get("_provider_source_index")
+        try:
+            return int(source_index)
+        except (TypeError, ValueError):
+            return fallback_index
+
+    def _skip_provider_reason(self, provider: Dict[str, Any]) -> str:
+        """缺少地址或 Key 的提供商直接跳过，避免无意义请求。"""
+        mode = str(
+            provider.get("interface_mode")
+            if "interface_mode" in provider
+            else self.config.get("interface_mode") or ""
+        ).strip().lower()
+        if "base_url" in provider:
+            base_url = str(provider.get("base_url") or "").strip()
+        else:
+            base_url = str(self.config.get("base_url") or "").strip()
+        if mode != "gemini_official" and not base_url:
+            return "未配置接口地址"
+
+        keys = provider.get("api_keys") if "api_keys" in provider else self.config.get("api_keys")
+        if not self._normalize_keys(keys):
+            return "未配置 API Key"
+        return ""
+
+    async def _get_provider_manager(
+        self,
+        cache_key: int,
+        provider_config: Dict[str, Any],
+    ) -> "ApiManager":
+        fingerprint = self._provider_fingerprint(provider_config)
+        async with self._provider_manager_lock:
+            cached = self._provider_managers.get(cache_key)
+            if cached and cached[0] == fingerprint:
+                cached[1].config = provider_config
+                return cached[1]
+
+            if cached:
+                await cached[1].close()
+
+            manager = ApiManager(provider_config)
+            self._provider_managers[cache_key] = (fingerprint, manager)
+            return manager
+
+    async def _prune_provider_managers(self, valid_keys: List[int]) -> None:
+        """关闭已删除、已停用或已移出当前列表的提供商会话。"""
+        valid_key_set = set(valid_keys)
+        async with self._provider_manager_lock:
+            stale_keys = [
+                key for key in self._provider_managers if key not in valid_key_set
+            ]
+            stale_managers = [
+                self._provider_managers.pop(key)[1] for key in stale_keys
+            ]
+
+        for manager in stale_managers:
+            await manager.close()
+
+    @staticmethod
+    def _select_provider_model(
+        provider: Dict[str, Any], requested_model: str, use_text_to_image_api: bool
+    ) -> str:
+        if use_text_to_image_api:
+            text_model = str(provider.get("text_to_image_model") or "").strip()
+            if text_model:
+                return text_model
+
+        provider_model = str(provider.get("model") or "").strip()
+        return provider_model or requested_model
+
+    async def _call_api_with_provider_fallback(
+        self,
+        providers: List[Dict[str, Any]],
+        images: List[bytes],
+        prompt: str,
+        requested_model: str,
+        proxy: str = None,
+        use_text_to_image_api: bool = False,
+        aspect_ratio: str = None,
+        resolution: str = None,
+    ) -> bytes | str:
+        """按配置顺序调用提供商，当前项失败时自动尝试下一项。"""
+        self._reset_metrics()
+        failures = []
+        attempt_count = 0
+        await self._prune_provider_managers([
+            self._get_provider_cache_key(provider, index)
+            for index, provider in enumerate(providers)
+            if not self._skip_provider_reason(provider)
+        ])
+
+        for index, provider in enumerate(providers):
+            source_index = int(provider.get("_provider_source_index", index))
+            provider_name = self._normalize_provider_name(provider, source_index)
+            skip_reason = self._skip_provider_reason(provider)
+            if skip_reason:
+                failures.append(f"{provider_name}: {skip_reason}")
+                logger.warning(
+                    f"模型提供商 {provider_name} 配置不完整，已跳过: {skip_reason}"
+                )
+                continue
+
+            provider_model = self._select_provider_model(
+                provider, requested_model, use_text_to_image_api
+            )
+            provider_config = self._build_provider_config(provider)
+            cache_key = self._get_provider_cache_key(provider, index)
+            manager = await self._get_provider_manager(cache_key, provider_config)
+            attempt_count += 1
+
+            logger.info(
+                f"正在尝试模型提供商 {index + 1}/{len(providers)}: "
+                f"{provider_name}，模型: {provider_model}"
+            )
+
+            try:
+                result = await manager.call_api(
+                    images,
+                    prompt,
+                    provider_model,
+                    proxy,
+                    use_text_to_image_api=use_text_to_image_api,
+                    aspect_ratio=aspect_ratio,
+                    resolution=resolution,
+                )
+            except Exception as exc:
+                result = f"系统错误: {type(exc).__name__}: {exc}"
+
+            metrics = manager.get_last_metrics()
+            metrics.update({
+                "provider_name": provider_name,
+                "model": provider_model,
+                "provider_index": source_index,
+                "provider_attempts": attempt_count,
+            })
+            self._last_metrics = metrics
+
+            if isinstance(result, bytes) and result:
+                logger.info(f"模型提供商 {provider_name} 调用成功")
+                return result
+
+            error_text = str(result or "返回了空结果").strip()
+            failures.append(f"{provider_name}: {error_text[:500]}")
+            if index + 1 < len(providers):
+                logger.warning(
+                    f"模型提供商 {provider_name} 调用失败，自动后退到下一项: {error_text[:300]}"
+                )
+
+        self._last_metrics.update({
+            "provider_name": "",
+            "model": requested_model,
+            "provider_attempts": attempt_count,
+        })
+        return "所有模型提供商均调用失败：\n" + "\n".join(
+            f"- {failure}" for failure in failures
+        )
 
     def _normalize_call_api_args(self, legacy_use_power_or_proxy=None, proxy=None, use_text_to_image_api: bool = False):
         """兼容旧版 call_api 调用签名：
@@ -921,6 +1244,23 @@ class ApiManager:
         proxy, use_text_to_image_api = self._normalize_call_api_args(
             legacy_use_power_or_proxy, proxy, use_text_to_image_api
         )
+
+        providers = self._get_enabled_providers()
+        if providers:
+            return await self._call_api_with_provider_fallback(
+                providers,
+                images,
+                prompt,
+                model,
+                proxy,
+                use_text_to_image_api=use_text_to_image_api,
+                aspect_ratio=aspect_ratio,
+                resolution=resolution,
+            )
+
+        raw_providers = self.config.get("model_providers", [])
+        if isinstance(raw_providers, list) and raw_providers:
+            return "模型提供商列表中没有已启用的有效配置"
 
         if self.config.get("enable_luxury_mode", False):
             return await self._call_api_with_luxury_mode(

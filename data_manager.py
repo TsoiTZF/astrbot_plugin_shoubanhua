@@ -1,6 +1,5 @@
 import json
 import asyncio
-import random
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, Any, Optional, Tuple, List
@@ -15,7 +14,6 @@ class DataManager:
 
         self.user_counts_file = self.data_dir / "user_counts.json"
         self.group_counts_file = self.data_dir / "group_counts.json"
-        self.user_checkin_file = self.data_dir / "user_checkin.json"
         self.daily_stats_file = self.data_dir / "daily_stats.json"
         self.preset_images_file = self.data_dir / "preset_images.json"
         self.user_prompts_file = self.data_dir / "user_prompts.json"
@@ -39,7 +37,6 @@ class DataManager:
 
         self.user_counts: Dict[str, int] = {}
         self.group_counts: Dict[str, int] = {}
-        self.user_checkin_data: Dict[str, str] = {}
         self.daily_stats: Dict[str, Any] = {}
         self.preset_images: Dict[str, str] = {}
         self.user_prompts: Dict[str, str] = {}
@@ -49,7 +46,6 @@ class DataManager:
     async def initialize(self):
         await self._load_json(self.user_counts_file, "user_counts")
         await self._load_json(self.group_counts_file, "group_counts")
-        await self._load_json(self.user_checkin_file, "user_checkin_data")
         await self._load_json(self.user_prompts_file, "user_prompts")
         await self._load_json(self.preset_ref_images_file, "preset_ref_images")  # 加载预设参考图索引
 
@@ -160,22 +156,6 @@ class DataManager:
         gid = norm_id(gid)
         self.group_counts[gid] = self.get_group_count(gid) + amount
         await self._save_json(self.group_counts_file, self.group_counts)
-
-    async def process_checkin(self, uid: str) -> str:
-        uid = norm_id(uid)
-        today = datetime.now().strftime("%Y-%m-%d")
-        if self.user_checkin_data.get(uid) == today:
-            return f"已签到。剩余: {self.get_user_count(uid)}"
-
-        reward = int(self.config.get("checkin_fixed_reward", 3))
-        if self.config.get("enable_random_checkin", False):
-            max_r = int(self.config.get("checkin_random_reward_max", 5))
-            reward = random.randint(1, max(1, max_r))
-
-        await self.add_user_count(uid, reward)
-        self.user_checkin_data[uid] = today
-        await self._save_json(self.user_checkin_file, self.user_checkin_data)
-        return f"🎉 签到成功 +{reward}次。"
 
     async def record_usage(self, uid: str, gid: Optional[str]):
         today = datetime.now().strftime("%Y-%m-%d")

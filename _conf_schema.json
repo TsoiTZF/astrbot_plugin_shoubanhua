@@ -75,6 +75,85 @@
         },
         "default": []
     },
+    "model_providers": {
+        "description": "【核心】模型提供商回退列表",
+        "type": "template_list",
+        "hint": "按列表顺序调用。当前提供商返回错误、异常或空结果时，会自动后退到下一项；缺少地址或 Key 的条目会直接跳过；任意提供商成功返回图片后立即停止。留空时继续使用上方单提供商配置。需要 AstrBot v4.10.4 或更高版本。",
+        "default": [],
+        "templates": {
+            "image_provider": {
+                "name": "图片模型提供商",
+                "hint": "为每个中转站或官方接口单独配置地址、Key 和模型。拖动条目即可调整回退优先级。",
+                "display_item": "name",
+                "items": {
+                    "name": {
+                        "description": "提供商名称",
+                        "type": "string",
+                        "hint": "仅用于日志和错误汇总，例如主站、备用站、Gemini 官方。",
+                        "default": "备用提供商"
+                    },
+                    "enabled": {
+                        "description": "启用此提供商",
+                        "type": "bool",
+                        "default": true
+                    },
+                    "interface_mode": {
+                        "description": "接口模式",
+                        "type": "string",
+                        "options": [
+                            "openai_image",
+                            "openai_chat",
+                            "gemini_official",
+                            "custom_endpoint"
+                        ],
+                        "default": "openai_image"
+                    },
+                    "base_url": {
+                        "description": "接口地址",
+                        "type": "string",
+                        "hint": "OpenAI/Gemini 模式填写基础地址；Gemini 官方模式可留空；custom_endpoint 填完整路径。",
+                        "default": ""
+                    },
+                    "api_keys": {
+                        "description": "API Keys",
+                        "type": "text",
+                        "hint": "可填写一个或多个 Key，多个 Key 建议按行填写并自动轮询。",
+                        "default": ""
+                    },
+                    "model": {
+                        "description": "默认模型",
+                        "type": "string",
+                        "hint": "该提供商处理图生图和普通生成时使用的模型。",
+                        "default": "nano-banana"
+                    },
+                    "text_to_image_model": {
+                        "description": "文生图模型",
+                        "type": "string",
+                        "hint": "留空时使用该提供商的默认模型。",
+                        "default": ""
+                    },
+                    "prefer_images_api": {
+                        "description": "OpenAI Chat 优先尝试 Images API",
+                        "type": "bool",
+                        "hint": "仅 openai_chat 模式生效；多图输入仍优先保留 Chat 接口。",
+                        "default": false
+                    },
+                    "use_stream": {
+                        "description": "启用流式请求",
+                        "type": "bool",
+                        "hint": "主要用于 OpenAI Chat 兼容接口。",
+                        "default": false
+                    }
+                }
+            }
+        }
+    },
+    "active_provider": {
+        "description": "【核心】当前提供商调用起点",
+        "type": "string",
+        "hint": "通常无需手动填写。可用 #切换提供商 <序号或名称> 设置；同名条目请按序号切换。该提供商失败后会循环尝试其余启用项。留空或填写自动时按面板顺序调用。",
+        "default": ""
+    },
     "image_resolution": {
         "description": "【画质】图像分辨率",
         "type": "string",
@@ -121,7 +200,7 @@
     "show_model_info": {
         "description": "【显示】显示模型信息",
         "type": "bool",
-        "hint": "开启后，在成功或失败提示中展示实际使用的模型名称。",
+        "hint": "开启后，在成功提示中展示实际成功的提供商名称和模型名称。",
         "default": false
     },
     "debug_mode": {
@@ -264,28 +343,6 @@
         "type": "bool",
         "hint": "开启后，限制每个群组的总调用次数。",
         "default": false
-    },
-    "enable_checkin": {
-        "description": "【签到】启用每日签到",
-        "type": "bool",
-        "hint": "开启后用户可通过 #手办化签到 获取次数。",
-        "default": false
-    },
-    "checkin_fixed_reward": {
-        "description": "【签到】固定奖励",
-        "type": "int",
-        "hint": "关闭随机奖励时，每次签到获得的次数。",
-        "default": 3
-    },
-    "enable_random_checkin": {
-        "description": "【签到】启用随机奖励",
-        "type": "bool",
-        "default": false
-    },
-    "checkin_random_reward_max": {
-        "description": "【签到】随机奖励最大值",
-        "type": "int",
-        "default": 5
     },
     "preset_table_quality": {
         "description": "【显示】预设表格清晰度",

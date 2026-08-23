@@ -103,11 +103,15 @@ _CLOTHING_KEYWORDS = [
     "astrbot_plugin_shoubanhua",
     "shskjw",
     "支持第三方所有OpenAI绘图格式和原生Google Gemini 终极缝合怪，文生图/图生图插件，支持LLM智能判断",
-    "2.9.0",
+    "2.12.0",
     "https://github.com/shskjw/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
     _DEPRECATED_CONFIG_KEYS = [
+        "enable_checkin",
+        "checkin_fixed_reward",
+        "enable_random_checkin",
+        "checkin_random_reward_max",
         "enable_power_model",
         "power_model_keyword",
         "power_model_id",
@@ -128,6 +132,7 @@ class FigurineProPlugin(Star):
         "base_url",
         "api_keys",
         "api_mode",
+        "active_provider",
         "prompt_list",
         "generic_api_url",
         "generic_api_keys",
@@ -143,6 +148,7 @@ class FigurineProPlugin(Star):
         "text_to_image_model",
         "interface_mode",
         "api_mode",
+        "active_provider",
         "prompt_list",
         "generic_api_keys",
         "gemini_api_keys",
@@ -154,6 +160,7 @@ class FigurineProPlugin(Star):
         "interface_mode",
         "api_keys",
         "api_mode",
+        "active_provider",
         "prompt_list",
     }
     _PANEL_PRIORITY_DYNAMIC_KEYS = {
@@ -868,7 +875,7 @@ class FigurineProPlugin(Star):
 
         auto_detect_status = "已启用" if self._llm_auto_detect else "未启用"
         logger.info(
-            f"FigurinePro 插件已加载 v2.5.5 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
+            f"FigurinePro 插件已加载 v2.12.0 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
 
     def is_admin(self, event: AstrMessageEvent) -> bool:
         sender_id = norm_id(event.get_sender_id())
@@ -1907,6 +1914,13 @@ class FigurineProPlugin(Star):
 
         return f"{total:.2f}s"
 
+    def _format_active_model_info(self, fallback_model: str) -> str:
+        """显示实际成功的提供商和模型；单提供商模式继续只显示模型。"""
+        metrics = self.api_mgr.get_last_metrics() if hasattr(self.api_mgr, "get_last_metrics") else {}
+        model = str(metrics.get("model") or fallback_model).strip()
+        provider_name = str(metrics.get("provider_name") or "").strip()
+        return f"{provider_name} / {model}" if provider_name else model
+
     def _is_transient_generation_error(self, error: Any) -> bool:
         """识别适合自动重试的一次性网络抖动错误。"""
         text = str(error or "").lower()
@@ -2411,7 +2425,7 @@ class FigurineProPlugin(Star):
                         info_text += f" | 规则: {extra_rules[:20]}{'...' if len(extra_rules) > 20 else ''}"
                     info_text += f" | 剩余: {quota_str}"
                     if self.conf.get("show_model_info", False):
-                        info_text += f" | {model}"
+                        info_text += f" | {self._format_active_model_info(model)}"
                     chain_nodes.append(Plain(info_text))
                 else:
                     chain_nodes.append(Plain(" "))  # 防止某些适配器丢弃纯图片消息
@@ -3350,7 +3364,7 @@ class FigurineProPlugin(Star):
             timing_text = self._format_success_timing(elapsed)
             info = f"\n✅ 生成成功 ({timing_text}) | 预设: {preset_name} | 剩余: {quota_str}"
             if self.conf.get("show_model_info", False):
-                info += f" | {model}"
+                info += f" | {self._format_active_model_info(model)}"
 
             yield event.chain_result([Image.fromBytes(res), Plain(info)])
         else:
@@ -3530,13 +3544,6 @@ class FigurineProPlugin(Star):
         msg = f"🔍 [{kw}]:\n{prompt}" if prompt else f"没找到 [{kw}]"
         yield event.chain_result([Plain(msg)])
 
-    @filter.command("手办化签到", prefix_optional=True)
-    async def on_checkin(self, event: AstrMessageEvent, ctx=None):
-        if not self.conf.get("enable_checkin", False): yield event.chain_result([Plain("未开启签到")]); return
-        uid = norm_id(event.get_sender_id())
-        msg = await self.data_mgr.process_checkin(uid)
-        yield event.chain_result([Plain(msg)])
-
     @filter.command("手办化查询次数", prefix_optional=True)
     async def on_query_count(self, event: AstrMessageEvent, ctx=None):
         uid = norm_id(event.get_sender_id())
@@ -3614,6 +3621,150 @@ class FigurineProPlugin(Star):
             self.conf["model"] = target
             self._save_config(["model"])
             yield event.chain_result([Plain(f"✅ 已直接切换为自定义模型: {target}")])
+
+    def _get_configured_provider_entries(self) -> List[Tuple[int, Dict[str, Any], str]]:
+        """返回配置条目、原始序号和稳定显示名称，供管理指令统一使用。"""
+        raw_providers = self.conf.get("model_providers", [])
+        if not isinstance(raw_providers, list):
+            return []
+
+        entries = []
+        for index, provider in enumerate(raw_providers):
+            if not isinstance(provider, dict):
+                continue
+            name = self.api_mgr._normalize_provider_name(provider, index)
+            entries.append((index, provider, name))
+        return entries
+
+    def _is_active_provider_entry(
+        self,
+        source_index: int,
+        provider_name: str,
+        enabled: bool,
+        selector: str,
+    ) -> bool:
+        """判断配置条目是否为当前起点，兼容旧名称和新版序号选择器。"""
+        if not enabled or not selector:
+            return False
+        selected_index = self.api_mgr._parse_provider_index_selector(selector)
+        if selected_index is not None:
+            return selected_index == source_index
+        return selector == provider_name
+
+    @filter.command("提供商列表", aliases={"供应商列表"}, prefix_optional=True)
+    async def on_provider_list(self, event: AstrMessageEvent, ctx=None):
+        if not self.is_admin(event):
+            yield event.chain_result([Plain("❌ 只有管理员可以查看模型提供商。")])
+            return
+
+        entries = self._get_configured_provider_entries()
+        if not entries:
+            yield event.chain_result([Plain(
+                "📋 尚未配置多提供商，当前使用旧版单提供商配置。"
+            )])
+            return
+
+        active_provider = str(self.conf.get("active_provider") or "").strip()
+        if self.api_mgr._is_auto_provider_selector(active_provider):
+            active_provider = ""
+        lines = ["📋 模型提供商列表："]
+        for index, provider, name in entries:
+            enabled = provider.get("enabled", True) is not False
+            status = "已启用" if enabled else "已停用"
+            active = " ⭐ 当前起点" if self._is_active_provider_entry(
+                index, name, enabled, active_provider
+            ) else ""
+            mode = str(provider.get("interface_mode") or "未设置")
+            model = str(provider.get("model") or "未设置")
+            lines.append(
+                f"{index + 1}. {name}｜{status}｜{mode}｜{model}{active}"
+            )
+
+        if not active_provider:
+            lines.append("\n当前模式：自动，按面板顺序开始回退。")
+        elif not any(
+            self._is_active_provider_entry(index, name, provider.get("enabled", True) is not False, active_provider)
+            for index, provider, name in entries
+        ):
+            lines.append(
+                f"\n当前选择“{active_provider}”已失效，调用时会自动按面板顺序回退。"
+            )
+
+        lines.append("用法：#切换提供商 <序号或名称>；#切换提供商 自动")
+        yield event.chain_result([Plain("\n".join(lines))])
+
+    @filter.command("切换提供商", aliases={"切换供应商"}, prefix_optional=True)
+    async def on_switch_provider(self, event: AstrMessageEvent, ctx=None):
+        if not self.is_admin(event):
+            yield event.chain_result([Plain("❌ 只有管理员可以切换模型提供商。")])
+            return
+
+        entries = self._get_configured_provider_entries()
+        parts = event.message_str.strip().split(maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            yield event.chain_result([Plain(
+                "用法：#切换提供商 <序号或名称>\n"
+                "恢复默认顺序：#切换提供商 自动\n"
+                "查看配置：#提供商列表"
+            )])
+            return
+
+        target = parts[1].strip()
+        if self.api_mgr._is_auto_provider_selector(target):
+            self.conf["active_provider"] = ""
+            self._save_config(["active_provider"])
+            yield event.chain_result([Plain("✅ 已恢复自动模式，将按面板顺序开始回退。")])
+            return
+
+        if not entries:
+            yield event.chain_result([Plain(
+                "❌ 尚未配置多提供商，请先在插件配置页面添加 model_providers。"
+            )])
+            return
+
+        selected = None
+        target_index = self.api_mgr._parse_provider_index_selector(target)
+        if target_index is not None:
+            selected = next(
+                (entry for entry in entries if entry[0] == target_index),
+                None,
+            )
+            if selected is None:
+                yield event.chain_result([Plain(
+                    "❌ 提供商序号超出范围，请先发送 #提供商列表。"
+                )])
+                return
+        else:
+            matches = [entry for entry in entries if entry[2] == target]
+            if len(matches) > 1:
+                yield event.chain_result([Plain(
+                    f"❌ 提供商名称“{target}”重复，请改用序号切换，例如 #切换提供商 {matches[0][0] + 1}。"
+                )])
+                return
+            if matches:
+                selected = matches[0]
+
+        if selected is None:
+            yield event.chain_result([Plain(
+                f"❌ 未找到提供商“{target}”，请先发送 #提供商列表。"
+            )])
+            return
+
+        index, provider, provider_name = selected
+        if provider.get("enabled", True) is False:
+            yield event.chain_result([Plain(
+                f"❌ 提供商“{provider_name}”已停用，请先在配置页面启用。"
+            )])
+            return
+
+        duplicate_count = sum(1 for _, _, name in entries if name == provider_name)
+        selector = f"#{index + 1}" if duplicate_count > 1 else provider_name
+        self.conf["active_provider"] = selector
+        self._save_config(["active_provider"])
+        yield event.chain_result([Plain(
+            f"✅ 已切换到提供商：{index + 1}. {provider_name}\n"
+            "该提供商失败时，会继续自动尝试其余已启用提供商。"
+        )])
 
     @filter.command("手办化今日统计", prefix_optional=True)
     async def on_daily_stats(self, event: AstrMessageEvent, ctx=None):
@@ -6192,3 +6343,7 @@ class FigurineProPlugin(Star):
 
         # 启动异步任务
         asyncio.create_task(process_all())
+
+    async def terminate(self):
+        """插件停用或卸载时释放所有模型提供商的 HTTP 会话。"""
+        await self.api_mgr.close()

@@ -4,6 +4,8 @@ import sys
 import types
 import unittest
 
+from test_support import install_api_manager_stubs
+
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PACKAGE = "shoubanhua_test_package"
@@ -15,14 +17,7 @@ def load_api_manager():
         package.__path__ = [str(ROOT)]
         sys.modules[PACKAGE] = package
 
-    if "astrbot" not in sys.modules:
-        astrbot = types.ModuleType("astrbot")
-        astrbot.logger = types.SimpleNamespace(
-            info=lambda *args, **kwargs: None,
-            warning=lambda *args, **kwargs: None,
-            error=lambda *args, **kwargs: None,
-        )
-        sys.modules["astrbot"] = astrbot
+    install_api_manager_stubs()
 
     return importlib.import_module(f"{PACKAGE}.api_manager").ApiManager
 

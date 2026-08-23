@@ -9,9 +9,11 @@ help: |
   - 智能工具：shoubanhua_smart_generate
   
   管理命令：
+  - #提供商列表 - 查看多提供商状态
+  - #切换提供商 <序号或名称> - 切换调用起点并保留自动回退
   - #上下文状态 - 查看上下文状态
   - #清除上下文 - 清除当前会话上下文
   - #测试智能判断 <文本> - 测试智能判断功能
-version: v2.9.2
+version: v2.12.0
 author: shskjw
 repo: https://github.com/shskjw/astrbot_plugin_shoubanhua
