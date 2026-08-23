@@ -1,6 +1,6 @@
 {
     "interface_mode": {
-        "description": "接口模式",
+        "description": "【主提供商】接口模式",
         "type": "string",
         "options": [
             "openai_image",
@@ -12,13 +12,13 @@
         "default": "openai_image"
     },
     "base_url": {
-        "description": "接口地址",
+        "description": "【主提供商】接口地址",
         "type": "string",
         "hint": "非自定义模式只填写基础地址，例如 https://api.example.com 或 https://api.example.com/api，不需要填写 v1、v1beta 或具体接口路径；即使已填写也会自动忽略，并按所选接口模式重新补全。Gemini 官方模式可留空。custom_endpoint 模式必须填写完整请求路径。",
         "default": ""
     },
     "api_keys": {
-        "description": "API Keys",
+        "description": "【主提供商】API Keys",
         "type": "text",
         "hint": "可填写一个或多个 key，多个 key 建议按行填写。",
         "default": ""
@@ -48,25 +48,25 @@
         ]
     },
     "model": {
-        "description": "【通用】默认模型名称",
+        "description": "【主提供商】默认模型名称",
         "type": "string",
-        "hint": "当前默认使用的模型ID。这里可以直接填写任意模型名称，不需要出现在【核心】模型列表配置中。",
+        "hint": "上方主提供商默认使用的模型 ID。这里可以直接填写任意模型名称，不需要出现在【核心】模型列表配置中。",
         "default": "nano-banana"
     },
     "text_to_image_model": {
-        "description": "【通用】文生图专用模型",
+        "description": "【主提供商】文生图专用模型",
         "type": "string",
         "hint": "文生图功能使用的专用模型ID。这里也可以直接填写任意模型名称，不需要出现在【核心】模型列表配置中。【非必填】留空时会自动回退使用【通用】默认模型名称，不会影响文生图功能正常使用。",
         "default": ""
     },
     "text_to_image_api_url": {
-        "description": "【通用】文生图专用接口地址",
+        "description": "【主提供商】文生图专用接口地址",
         "type": "string",
         "hint": "仅用于文生图功能的专用 API 基础地址。只需填写 https://api.example.com 一类基础 URL，版本段和接口路径会被忽略，并按当前接口模式自动补全。【非必填】留空时自动使用统一接口地址。",
         "default": ""
     },
     "text_to_image_api_keys": {
-        "description": "【通用】文生图专用 API Key 池",
+        "description": "【主提供商】文生图专用 API Key 池",
         "type": "list",
         "hint": "仅用于文生图功能的专用 Key 轮询池。【非必填】留空时会自动回退使用当前模式下的普通 API Key 池，不会导致文生图不可用。",
         "items": {
@@ -76,14 +76,14 @@
         "default": []
     },
     "model_providers": {
-        "description": "【核心】模型提供商回退列表",
+        "description": "【核心】备用提供商回退列表",
         "type": "template_list",
-        "hint": "按列表顺序调用。当前提供商返回错误、异常或空结果时，会自动后退到下一项；缺少地址或 Key 的条目会直接跳过；任意提供商成功返回图片后立即停止。留空时继续使用上方单提供商配置。需要 AstrBot v4.10.4 或更高版本。",
+        "hint": "上方统一配置自动作为主提供商，本列表作为备用链。主提供商失败后按这里的顺序调用；当前备用项返回错误、异常或空结果时会继续下一项；缺少地址或 Key 的条目会直接跳过。需要 AstrBot v4.10.4 或更高版本。",
         "default": [],
         "templates": {
             "image_provider": {
                 "name": "图片模型提供商",
-                "hint": "为每个中转站或官方接口单独配置地址、Key 和模型。拖动条目即可调整回退优先级。",
+                "hint": "添加备用中转站或官方接口。上方主提供商失败后，按此处列表顺序回退。拖动条目即可调整备用优先级。",
                 "display_item": "name",
                 "items": {
                     "name": {
@@ -151,7 +151,7 @@
     "active_provider": {
         "description": "【核心】当前提供商调用起点",
         "type": "string",
-        "hint": "通常无需手动填写。可用 #切换提供商 <序号或名称> 设置；同名条目请按序号切换。该提供商失败后会循环尝试其余启用项。留空或填写自动时按面板顺序调用。",
+        "hint": "通常无需手动填写。可用 #切换提供商 <统一列表序号或名称> 设置；#提供商列表 会同时显示上方主提供商和下方备用项。所选项失败后仍会循环尝试其余启用项。留空或填写自动时按主提供商→备用列表调用。",
         "default": ""
     },
     "image_resolution": {

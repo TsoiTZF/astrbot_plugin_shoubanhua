@@ -103,7 +103,7 @@ _CLOTHING_KEYWORDS = [
     "astrbot_plugin_shoubanhua",
     "shskjw",
     "支持第三方所有OpenAI绘图格式和原生Google Gemini 终极缝合怪，文生图/图生图插件，支持LLM智能判断",
-    "2.12.0",
+    "2.12.1",
     "https://github.com/shskjw/astrbot_plugin_shoubanhua",
 )
 class FigurineProPlugin(Star):
@@ -875,7 +875,7 @@ class FigurineProPlugin(Star):
 
         auto_detect_status = "已启用" if self._llm_auto_detect else "未启用"
         logger.info(
-            f"FigurinePro 插件已加载 v2.12.0 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
+            f"FigurinePro 插件已加载 v2.12.1 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
 
     def is_admin(self, event: AstrMessageEvent) -> bool:
         sender_id = norm_id(event.get_sender_id())
@@ -3623,33 +3623,26 @@ class FigurineProPlugin(Star):
             yield event.chain_result([Plain(f"✅ 已直接切换为自定义模型: {target}")])
 
     def _get_configured_provider_entries(self) -> List[Tuple[int, Dict[str, Any], str]]:
-        """返回配置条目、原始序号和稳定显示名称，供管理指令统一使用。"""
-        raw_providers = self.conf.get("model_providers", [])
-        if not isinstance(raw_providers, list):
-            return []
-
+        """返回统一主备链条目，确保列表展示、切换和实际调用完全一致。"""
         entries = []
-        for index, provider in enumerate(raw_providers):
-            if not isinstance(provider, dict):
-                continue
-            name = self.api_mgr._normalize_provider_name(provider, index)
-            entries.append((index, provider, name))
+        for display_index, provider in enumerate(self.api_mgr._iter_configured_providers()):
+            source_index = int(provider.get("_provider_source_index", display_index))
+            name = self.api_mgr._normalize_provider_name(provider, source_index)
+            entries.append((display_index, provider, name))
         return entries
 
     def _is_active_provider_entry(
         self,
-        source_index: int,
-        provider_name: str,
+        provider: Dict[str, Any],
         enabled: bool,
-        selector: str,
+        active_identity: str,
     ) -> bool:
-        """判断配置条目是否为当前起点，兼容旧名称和新版序号选择器。"""
-        if not enabled or not selector:
-            return False
-        selected_index = self.api_mgr._parse_provider_index_selector(selector)
-        if selected_index is not None:
-            return selected_index == source_index
-        return selector == provider_name
+        """判断配置条目是否为当前起点。"""
+        return bool(
+            enabled
+            and active_identity
+            and provider.get("_provider_identity") == active_identity
+        )
 
     @filter.command("提供商列表", aliases={"供应商列表"}, prefix_optional=True)
     async def on_provider_list(self, event: AstrMessageEvent, ctx=None):
@@ -3660,19 +3653,32 @@ class FigurineProPlugin(Star):
         entries = self._get_configured_provider_entries()
         if not entries:
             yield event.chain_result([Plain(
-                "📋 尚未配置多提供商，当前使用旧版单提供商配置。"
+                "📋 尚未配置模型提供商，请先在上方填写主提供商，或在下方添加备用提供商。"
             )])
             return
 
         active_provider = str(self.conf.get("active_provider") or "").strip()
         if self.api_mgr._is_auto_provider_selector(active_provider):
             active_provider = ""
+        active_identity = ""
+        if active_provider:
+            enabled_providers = [
+                provider
+                for _, provider, _ in entries
+                if provider.get("enabled", True) is not False
+            ]
+            selected = self.api_mgr._resolve_active_provider(
+                enabled_providers, active_provider
+            )
+            if selected is not None:
+                active_identity = str(selected.get("_provider_identity") or "")
+
         lines = ["📋 模型提供商列表："]
         for index, provider, name in entries:
             enabled = provider.get("enabled", True) is not False
             status = "已启用" if enabled else "已停用"
             active = " ⭐ 当前起点" if self._is_active_provider_entry(
-                index, name, enabled, active_provider
+                provider, enabled, active_identity
             ) else ""
             mode = str(provider.get("interface_mode") or "未设置")
             model = str(provider.get("model") or "未设置")
@@ -3682,10 +3688,7 @@ class FigurineProPlugin(Star):
 
         if not active_provider:
             lines.append("\n当前模式：自动，按面板顺序开始回退。")
-        elif not any(
-            self._is_active_provider_entry(index, name, provider.get("enabled", True) is not False, active_provider)
-            for index, provider, name in entries
-        ):
+        elif not active_identity:
             lines.append(
                 f"\n当前选择“{active_provider}”已失效，调用时会自动按面板顺序回退。"
             )
@@ -3718,13 +3721,13 @@ class FigurineProPlugin(Star):
 
         if not entries:
             yield event.chain_result([Plain(
-                "❌ 尚未配置多提供商，请先在插件配置页面添加 model_providers。"
+                "❌ 尚未配置模型提供商，请先在上方填写主提供商，或在下方添加备用提供商。"
             )])
             return
 
         selected = None
-        target_index = self.api_mgr._parse_provider_index_selector(target)
-        if target_index is not None:
+        if target.isdigit():
+            target_index = int(target) - 1
             selected = next(
                 (entry for entry in entries if entry[0] == target_index),
                 None,
@@ -3757,8 +3760,8 @@ class FigurineProPlugin(Star):
             )])
             return
 
-        duplicate_count = sum(1 for _, _, name in entries if name == provider_name)
-        selector = f"#{index + 1}" if duplicate_count > 1 else provider_name
+        identity = str(provider.get("_provider_identity") or "").strip()
+        selector = f"@{identity}" if identity else provider_name
         self.conf["active_provider"] = selector
         self._save_config(["active_provider"])
         yield event.chain_result([Plain(

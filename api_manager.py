@@ -42,7 +42,7 @@ class ApiManager:
         self._session = None # 保持 Session 持久化，复用 TCP/SSL 连接
         self._last_metrics = {}
         self._last_download_metrics = {}
-        self._provider_managers: Dict[int, tuple[str, "ApiManager"]] = {}
+        self._provider_managers: Dict[str, tuple[str, "ApiManager"]] = {}
         self._provider_manager_lock = asyncio.Lock()
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -95,6 +95,7 @@ class ApiManager:
 
     @classmethod
     def _parse_provider_index_selector(cls, selector: str) -> int | None:
+        """兼容旧版 `#N`：N 始终表示下方备用列表的原始序号。"""
         text = str(selector or "").strip()
         if text.startswith("#") and text[1:].isdigit():
             return int(text[1:]) - 1
@@ -102,21 +103,61 @@ class ApiManager:
             return int(text) - 1
         return None
 
+    def _has_primary_provider_config(self) -> bool:
+        """上方地址或 Key 任一已填写时，将其纳入统一提供商链。"""
+        return bool(
+            str(self.config.get("base_url") or "").strip()
+            or self._normalize_keys(self.config.get("api_keys"))
+            or str(self.config.get("text_to_image_api_url") or "").strip()
+            or self._normalize_keys(self.config.get("text_to_image_api_keys"))
+            or str(self.config.get("generic_api_url") or "").strip()
+            or self._normalize_keys(self.config.get("generic_api_keys"))
+            or str(self.config.get("gemini_api_url") or "").strip()
+            or self._normalize_keys(self.config.get("gemini_api_keys"))
+        )
+
+    def _build_primary_provider(self) -> Dict[str, Any] | None:
+        if not self._has_primary_provider_config():
+            return None
+        return {
+            "name": "主提供商（上方配置）",
+            "enabled": True,
+            "interface_mode": self.config.get("interface_mode", "openai_image"),
+            "base_url": self.config.get("base_url", ""),
+            "api_keys": self.config.get("api_keys", ""),
+            "model": self.config.get("model", "nano-banana"),
+            "text_to_image_model": self.config.get("text_to_image_model", ""),
+            "prefer_images_api": self.config.get("generic_prefer_images_api", False),
+            "use_stream": self.config.get("use_stream", False),
+            "_provider_display_name": "主提供商（上方配置）",
+            "_provider_source_index": -1,
+            "_provider_identity": "primary",
+            "_provider_kind": "primary",
+        }
+
     def _annotate_provider(self, item: Dict[str, Any], source_index: int) -> Dict[str, Any]:
         provider = dict(item)
         provider["_provider_display_name"] = self._normalize_provider_name(item, source_index)
         provider["_provider_source_index"] = source_index
+        provider["_provider_identity"] = f"backup:{source_index}"
+        provider["_provider_kind"] = "backup"
         return provider
 
     def _iter_configured_providers(self) -> List[Dict[str, Any]]:
+        providers = []
+        primary = self._build_primary_provider()
+        if primary is not None:
+            providers.append(primary)
+
         raw_providers = self.config.get("model_providers", [])
         if not isinstance(raw_providers, list):
-            return []
-        return [
+            return providers
+        providers.extend(
             self._annotate_provider(item, source_index)
             for source_index, item in enumerate(raw_providers)
             if isinstance(item, dict)
-        ]
+        )
+        return providers
 
     def _get_enabled_providers(self) -> List[Dict[str, Any]]:
         """读取启用项，并让指令选中的提供商成为本轮回退起点。"""
@@ -141,7 +182,7 @@ class ApiManager:
             (
                 index
                 for index, provider in enumerate(providers)
-                if provider.get("_provider_source_index") == selected.get("_provider_source_index")
+                if provider.get("_provider_identity") == selected.get("_provider_identity")
             ),
             None,
         )
@@ -152,14 +193,27 @@ class ApiManager:
     def _resolve_active_provider(
         self, providers: List[Dict[str, Any]], selector: str
     ) -> Dict[str, Any] | None:
-        """按源序号或唯一名称定位启用项，重名时只接受序号。"""
-        source_index = self._parse_provider_index_selector(selector)
+        """按稳定身份、旧备用序号或唯一名称定位启用项。"""
+        text = str(selector or "").strip()
+        if text.startswith("@"):
+            identity = text[1:]
+            return next(
+                (
+                    provider
+                    for provider in providers
+                    if provider.get("_provider_identity") == identity
+                ),
+                None,
+            )
+
+        source_index = self._parse_provider_index_selector(text)
         if source_index is not None:
             return next(
                 (
                     provider
                     for provider in providers
-                    if provider.get("_provider_source_index") == source_index
+                    if provider.get("_provider_kind") == "backup"
+                    and provider.get("_provider_source_index") == source_index
                 ),
                 None,
             )
@@ -169,7 +223,7 @@ class ApiManager:
             for provider in providers
             if self._normalize_provider_name(
                 provider, int(provider.get("_provider_source_index", 0))
-            ) == selector
+            ) == text
         ]
         if len(matches) == 1:
             return matches[0]
@@ -179,6 +233,10 @@ class ApiManager:
         """将单个提供商覆盖到全局网络与生成配置上。"""
         provider_config = dict(self.config)
         provider_config.pop("model_providers", None)
+        provider_config.pop("active_provider", None)
+
+        if provider.get("_provider_kind") == "primary":
+            return provider_config
 
         field_map = {
             "interface_mode": "interface_mode",
@@ -191,14 +249,13 @@ class ApiManager:
             if source_key in provider:
                 provider_config[target_key] = provider.get(source_key)
 
-        # 提供商使用统一地址和 Key，避免旧版专用字段意外覆盖当前项。
+        # 备用提供商使用统一地址和 Key，避免上方专用字段意外覆盖当前项。
         provider_config["text_to_image_api_url"] = ""
         provider_config["text_to_image_api_keys"] = []
         provider_config["generic_api_url"] = ""
         provider_config["generic_api_keys"] = []
         provider_config["gemini_api_url"] = ""
         provider_config["gemini_api_keys"] = []
-        provider_config.pop("active_provider", None)
         return provider_config
 
     @classmethod
@@ -211,35 +268,46 @@ class ApiManager:
         fingerprint["api_keys"] = cls._normalize_keys(fingerprint.get("api_keys"))
         return json.dumps(fingerprint, ensure_ascii=False, sort_keys=True, default=str)
 
-    def _get_provider_cache_key(self, provider: Dict[str, Any], fallback_index: int) -> int:
-        source_index = provider.get("_provider_source_index")
-        try:
-            return int(source_index)
-        except (TypeError, ValueError):
-            return fallback_index
+    def _get_provider_cache_key(self, provider: Dict[str, Any], fallback_index: int) -> str:
+        identity = str(provider.get("_provider_identity") or "").strip()
+        return identity or f"fallback:{fallback_index}"
 
-    def _skip_provider_reason(self, provider: Dict[str, Any]) -> str:
+    def _skip_provider_reason(
+        self,
+        provider: Dict[str, Any],
+        use_text_to_image_api: bool = False,
+    ) -> str:
         """缺少地址或 Key 的提供商直接跳过，避免无意义请求。"""
-        mode = str(
-            provider.get("interface_mode")
-            if "interface_mode" in provider
-            else self.config.get("interface_mode") or ""
-        ).strip().lower()
-        if "base_url" in provider:
-            base_url = str(provider.get("base_url") or "").strip()
-        else:
-            base_url = str(self.config.get("base_url") or "").strip()
+        provider_config = self._build_provider_config(provider)
+        mode = str(provider_config.get("interface_mode") or "").strip().lower()
+        base_url = ""
+        if use_text_to_image_api:
+            base_url = str(provider_config.get("text_to_image_api_url") or "").strip()
+        if not base_url:
+            base_url = str(provider_config.get("base_url") or "").strip()
+        if not base_url:
+            if mode == "gemini_official":
+                base_url = str(provider_config.get("gemini_api_url") or "").strip()
+            else:
+                base_url = str(provider_config.get("generic_api_url") or "").strip()
         if mode != "gemini_official" and not base_url:
             return "未配置接口地址"
 
-        keys = provider.get("api_keys") if "api_keys" in provider else self.config.get("api_keys")
-        if not self._normalize_keys(keys):
+        key_sources = []
+        if use_text_to_image_api:
+            key_sources.append(provider_config.get("text_to_image_api_keys"))
+        key_sources.append(provider_config.get("api_keys"))
+        if mode == "gemini_official":
+            key_sources.append(provider_config.get("gemini_api_keys"))
+        else:
+            key_sources.append(provider_config.get("generic_api_keys"))
+        if not any(self._normalize_keys(keys) for keys in key_sources):
             return "未配置 API Key"
         return ""
 
     async def _get_provider_manager(
         self,
-        cache_key: int,
+        cache_key: str,
         provider_config: Dict[str, Any],
     ) -> "ApiManager":
         fingerprint = self._provider_fingerprint(provider_config)
@@ -256,7 +324,7 @@ class ApiManager:
             self._provider_managers[cache_key] = (fingerprint, manager)
             return manager
 
-    async def _prune_provider_managers(self, valid_keys: List[int]) -> None:
+    async def _prune_provider_managers(self, valid_keys: List[str]) -> None:
         """关闭已删除、已停用或已移出当前列表的提供商会话。"""
         valid_key_set = set(valid_keys)
         async with self._provider_manager_lock:
@@ -300,13 +368,13 @@ class ApiManager:
         await self._prune_provider_managers([
             self._get_provider_cache_key(provider, index)
             for index, provider in enumerate(providers)
-            if not self._skip_provider_reason(provider)
+            if not self._skip_provider_reason(provider, use_text_to_image_api)
         ])
 
         for index, provider in enumerate(providers):
             source_index = int(provider.get("_provider_source_index", index))
             provider_name = self._normalize_provider_name(provider, source_index)
-            skip_reason = self._skip_provider_reason(provider)
+            skip_reason = self._skip_provider_reason(provider, use_text_to_image_api)
             if skip_reason:
                 failures.append(f"{provider_name}: {skip_reason}")
                 logger.warning(

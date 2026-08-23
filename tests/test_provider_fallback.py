@@ -129,7 +129,7 @@ class ProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(primary.call_api.await_args.args[2], "primary-model")
         self.assertEqual(
             [call.args[0] for call in get_manager.await_args_list],
-            [1, 0],
+            ["backup:1", "backup:0"],
         )
         metrics = self.manager.get_last_metrics()
         self.assertEqual(metrics["provider_name"], "主提供商")
@@ -262,7 +262,7 @@ class ProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, b"image-data")
         self.assertEqual(get_manager.await_count, 1)
-        self.assertEqual(get_manager.await_args.args[0], 1)
+        self.assertEqual(get_manager.await_args.args[0], "backup:1")
         self.assertEqual(self.manager.get_last_metrics()["provider_attempts"], 1)
 
     async def test_cache_fingerprint_ignores_unrelated_config_changes(self):
@@ -292,6 +292,132 @@ class ProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNot(first_manager, second_manager)
         first_manager.close.assert_awaited_once()
 
+    def test_top_config_is_primary_before_backup_list(self):
+        self.config.update({
+            "interface_mode": "openai_image",
+            "base_url": "https://top.example.com",
+            "api_keys": "top-key",
+            "model": "top-model",
+            "text_to_image_model": "top-text-model",
+        })
+
+        providers = self.manager._get_enabled_providers()
+
+        self.assertEqual(
+            [provider["_provider_identity"] for provider in providers],
+            ["primary", "backup:0", "backup:1"],
+        )
+        self.assertEqual(providers[0]["_provider_display_name"], "主提供商（上方配置）")
+        self.assertEqual(providers[0]["model"], "top-model")
+
+    async def test_top_config_fails_then_falls_back_to_lower_provider(self):
+        self.config.update({
+            "interface_mode": "openai_image",
+            "base_url": "https://top.example.com",
+            "api_keys": "top-key",
+            "model": "top-model",
+        })
+        top = types.SimpleNamespace(
+            call_api=AsyncMock(return_value="上方主站故障"),
+            get_last_metrics=lambda: {},
+        )
+        first_backup = types.SimpleNamespace(
+            call_api=AsyncMock(return_value=b"backup-image"),
+            get_last_metrics=lambda: {},
+        )
+
+        with patch.object(
+            self.manager,
+            "_get_provider_manager",
+            AsyncMock(side_effect=[top, first_backup]),
+        ) as get_manager:
+            result = await self.manager.call_api([], "画一只猫", "caller-model")
+
+        self.assertEqual(result, b"backup-image")
+        self.assertEqual(
+            [call.args[0] for call in get_manager.await_args_list],
+            ["primary", "backup:0"],
+        )
+        self.assertEqual(top.call_api.await_args.args[2], "top-model")
+        self.assertEqual(first_backup.call_api.await_args.args[2], "primary-model")
+
+    async def test_top_config_works_without_backup_list(self):
+        manager = self.ApiManager({
+            "interface_mode": "openai_image",
+            "base_url": "https://top.example.com",
+            "api_keys": "top-key",
+            "model": "top-model",
+            "model_providers": [],
+        })
+        top = types.SimpleNamespace(
+            call_api=AsyncMock(return_value=b"top-image"),
+            get_last_metrics=lambda: {},
+        )
+        try:
+            with patch.object(
+                manager,
+                "_get_provider_manager",
+                AsyncMock(return_value=top),
+            ) as get_manager:
+                result = await manager.call_api([], "画一只猫", "caller-model")
+
+            self.assertEqual(result, b"top-image")
+            self.assertEqual(get_manager.await_args.args[0], "primary")
+            self.assertEqual(manager.get_last_metrics()["provider_name"], "主提供商（上方配置）")
+        finally:
+            await manager.close()
+
+    async def test_top_text_only_config_is_valid_for_text_to_image(self):
+        manager = self.ApiManager({
+            "interface_mode": "openai_image",
+            "base_url": "",
+            "api_keys": "",
+            "text_to_image_api_url": "https://text.example.com",
+            "text_to_image_api_keys": ["text-key"],
+            "model": "normal-model",
+            "text_to_image_model": "text-model",
+            "model_providers": [],
+        })
+        top = types.SimpleNamespace(
+            call_api=AsyncMock(return_value=b"text-image"),
+            get_last_metrics=lambda: {},
+        )
+        try:
+            with patch.object(
+                manager,
+                "_get_provider_manager",
+                AsyncMock(return_value=top),
+            ) as get_manager:
+                result = await manager.call_api(
+                    [],
+                    "画一只猫",
+                    "caller-model",
+                    use_text_to_image_api=True,
+                )
+
+            self.assertEqual(result, b"text-image")
+            self.assertEqual(get_manager.await_args.args[0], "primary")
+            self.assertEqual(top.call_api.await_args.args[2], "text-model")
+        finally:
+            await manager.close()
+
+    def test_stable_identity_selector_can_select_primary_and_backup(self):
+        self.config.update({
+            "interface_mode": "openai_image",
+            "base_url": "https://top.example.com",
+            "api_keys": "top-key",
+        })
+        self.config["active_provider"] = "@backup:1"
+        providers = self.manager._get_enabled_providers()
+        self.assertEqual(
+            [provider["_provider_identity"] for provider in providers],
+            ["backup:1", "primary", "backup:0"],
+        )
+
+        self.config["active_provider"] = "@primary"
+        providers = self.manager._get_enabled_providers()
+        self.assertEqual(providers[0]["_provider_identity"], "primary")
+
     async def test_empty_provider_list_keeps_legacy_call_path(self):
         manager = self.ApiManager({"model_providers": []})
         try:
@@ -307,7 +433,7 @@ class ProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await manager.close()
 
-    async def test_all_disabled_providers_do_not_use_legacy_endpoint(self):
+    async def test_all_disabled_backups_still_report_incomplete_primary(self):
         manager = self.ApiManager({
             "model_providers": [{"name": "停用项", "enabled": False}],
             "base_url": "https://legacy.example.com",
@@ -320,7 +446,8 @@ class ProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
             ) as call_once:
                 result = await manager.call_api([], "画一只猫", "legacy-model")
 
-            self.assertEqual(result, "模型提供商列表中没有已启用的有效配置")
+            self.assertIn("所有模型提供商均调用失败", result)
+            self.assertIn("主提供商（上方配置）: 未配置 API Key", result)
             call_once.assert_not_awaited()
         finally:
             await manager.close()
@@ -348,10 +475,11 @@ class ProviderSchemaTest(unittest.TestCase):
         self.assertIn('@filter.command("提供商列表"', main_source)
         self.assertIn('@filter.command("切换提供商"', main_source)
         self.assertIn('"active_provider",', main_source)
-        self.assertIn('selector = f"#{index + 1}"', main_source)
+        self.assertIn("_iter_configured_providers()", main_source)
+        self.assertIn('selector = f"@{identity}"', main_source)
         self.assertIn('self._save_config(["active_provider"])', main_source)
-        self.assertIn('"2.12.0"', main_source)
-        self.assertIn("version: v2.12.0", (ROOT / "metadata.yaml").read_text(encoding="utf-8"))
+        self.assertIn('"2.12.1"', main_source)
+        self.assertIn("version: v2.12.1", (ROOT / "metadata.yaml").read_text(encoding="utf-8"))
         command_priority_block = main_source.split(
             "_COMMAND_PRIORITY_DYNAMIC_KEYS = {", 1
         )[1].split("}", 1)[0]
