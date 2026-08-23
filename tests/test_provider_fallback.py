@@ -310,6 +310,30 @@ class ProviderFallbackTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(providers[0]["_provider_display_name"], "主提供商（上方配置）")
         self.assertEqual(providers[0]["model"], "top-model")
 
+    async def test_provider_child_manager_is_leaf_and_does_not_recurse(self):
+        self.config.update({
+            "interface_mode": "openai_image",
+            "base_url": "https://top.example.com",
+            "api_keys": "top-key",
+            "model": "top-model",
+        })
+        provider = self.manager._get_enabled_providers()[0]
+        child_config = self.manager._build_provider_config(provider)
+        child = await self.manager._get_provider_manager("primary", child_config)
+
+        self.assertTrue(child.config["_provider_leaf"])
+        self.assertEqual(child._get_enabled_providers(), [])
+
+        with patch.object(
+            child,
+            "_call_api_once",
+            AsyncMock(return_value=b"leaf-image"),
+        ) as call_once:
+            result = await child.call_api([], "画一只猫", "top-model")
+
+        self.assertEqual(result, b"leaf-image")
+        call_once.assert_awaited_once()
+
     async def test_top_config_fails_then_falls_back_to_lower_provider(self):
         self.config.update({
             "interface_mode": "openai_image",
@@ -478,8 +502,11 @@ class ProviderSchemaTest(unittest.TestCase):
         self.assertIn("_iter_configured_providers()", main_source)
         self.assertIn('selector = f"@{identity}"', main_source)
         self.assertIn('self._save_config(["active_provider"])', main_source)
-        self.assertIn('"2.12.1"', main_source)
-        self.assertIn("version: v2.12.1", (ROOT / "metadata.yaml").read_text(encoding="utf-8"))
+        api_source = (ROOT / "api_manager.py").read_text(encoding="utf-8")
+        self.assertIn('provider_config["_provider_leaf"] = True', api_source)
+        self.assertIn('self.config.get("_provider_leaf", False)', api_source)
+        self.assertIn('"2.12.2"', main_source)
+        self.assertIn("version: v2.12.2", (ROOT / "metadata.yaml").read_text(encoding="utf-8"))
         command_priority_block = main_source.split(
             "_COMMAND_PRIORITY_DYNAMIC_KEYS = {", 1
         )[1].split("}", 1)[0]

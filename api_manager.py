@@ -144,6 +144,9 @@ class ApiManager:
         return provider
 
     def _iter_configured_providers(self) -> List[Dict[str, Any]]:
+        if self.config.get("_provider_leaf", False):
+            return []
+
         providers = []
         primary = self._build_primary_provider()
         if primary is not None:
@@ -234,6 +237,7 @@ class ApiManager:
         provider_config = dict(self.config)
         provider_config.pop("model_providers", None)
         provider_config.pop("active_provider", None)
+        provider_config["_provider_leaf"] = True
 
         if provider.get("_provider_kind") == "primary":
             return provider_config
