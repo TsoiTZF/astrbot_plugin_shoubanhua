@@ -74,7 +74,26 @@ class DataManager:
 
     def reload_prompts(self):
         self.prompt_map.clear()
-        # 内置预设
+
+        # 1. 尝试从 _conf_schema.json 加载插件内置的全部默认预设提示词
+        schema_file = self.data_dir.parent / "plugins" / "astrbot_plugin_shoubanhua" / "_conf_schema.json"
+        if not schema_file.exists():
+            # 兼容开发或非标准插件目录路径
+            schema_file = Path(__file__).resolve().parent / "_conf_schema.json"
+
+        if schema_file.exists():
+            try:
+                schema_data = json.loads(schema_file.read_text(encoding="utf-8-sig"))
+                default_prompts = schema_data.get("prompt_list", {}).get("default", [])
+                if isinstance(default_prompts, list):
+                    for item in default_prompts:
+                        if ":" in item:
+                            k, v = item.split(":", 1)
+                            self.prompt_map[k.strip()] = v.strip()
+            except Exception as e:
+                logger.warning(f"FigurinePro: 从 _conf_schema.json 加载默认预设失败: {e}")
+
+        # 2. 内置基础命令保底映射
         base_cmd_map = {
             "手办化": "figurine_1", "手办化2": "figurine_2", "手办化3": "figurine_3",
             "手办化4": "figurine_4", "手办化5": "figurine_5", "手办化6": "figurine_6",
@@ -85,9 +104,11 @@ class DataManager:
             "孤独的我": "clown",
             "第三视角": "view_3", "鬼图": "ghost", "第一视角": "view_1"
         }
-        for k in base_cmd_map.keys(): self.prompt_map[k] = "[内置预设]"
+        for k in base_cmd_map.keys():
+            if k not in self.prompt_map:
+                self.prompt_map[k] = f"Generate {k} style artwork based on reference image."
 
-        # 配置中的 prompts (兼容旧版)
+        # 3. 配置中的 prompts (兼容旧版)
         prompts_cfg = self.config.get("prompts", {})
         if isinstance(prompts_cfg, dict):
             for k, v in prompts_cfg.items():
@@ -96,15 +117,15 @@ class DataManager:
                 elif isinstance(v, str):
                     self.prompt_map[k] = v
 
-        # Prompt List (Config)
+        # 4. Prompt List (Config)
         prompt_list = self.config.get("prompt_list", [])
-        if isinstance(prompt_list, list):
+        if isinstance(prompt_list, list) and len(prompt_list) > 0:
             for item in prompt_list:
                 if ":" in item:
                     k, v = item.split(":", 1)
                     self.prompt_map[k.strip()] = v.strip()
         
-        # User Prompts (Persistence) - 优先级最高，覆盖前面的
+        # 5. User Prompts (Persistence) - 优先级最高，覆盖前面的
         for k, v in self.user_prompts.items():
             self.prompt_map[k] = v
 

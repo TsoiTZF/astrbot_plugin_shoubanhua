@@ -48,8 +48,10 @@ def load_webui():
 
 class DummyDataManager:
     def __init__(self):
+        self.data_dir = ROOT
+        self.config = {}
         self.user_prompts = {"测试手办": "masterpiece, 1girl figure"}
-        self.prompt_map = {"手办化": "[内置预设]", "测试手办": "masterpiece, 1girl figure"}
+        self.prompt_map = {"手办化": "Your task is to create a figurine", "测试手办": "masterpiece, 1girl figure"}
         self.ref_images = {"测试手办": [pathlib.Path("img1.png")]}
 
     def reload_prompts(self):
@@ -143,7 +145,6 @@ class WebUITest(unittest.IsolatedAsyncioTestCase):
         ctx.register_web_api = MagicMock()
         ui.register(ctx)
         self.assertTrue(ctx.register_web_api.called)
-        # 验证至少注册了 prompts 路由
         calls = [c[0][0] for c in ctx.register_web_api.call_args_list]
         self.assertIn("/astrbot_plugin_shoubanhua/page/prompts", calls)
         self.assertIn("/astrbot_plugin_shoubanhua/page/bootstrap", calls)
