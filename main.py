@@ -18,6 +18,7 @@ from .image_manager import ImageManager
 from .api_manager import ApiManager
 from .context_manager import ContextManager, LLMTaskAnalyzer
 from .utils import extract_image_urls_from_text, norm_id, normalize_model_list
+from .webui import ShoubanhuaWebUI
 
 # 内置叛逆词库 - 用于LLM判断时增加个性化回复
 # 注意：避免使用"画"字，因为人设拍照等场景不适合
@@ -875,6 +876,10 @@ class FigurineProPlugin(Star):
             logger.warning("FigurinePro: 未配置任何 API Key")
 
         auto_detect_status = "已启用" if self._llm_auto_detect else "未启用"
+        # 初始化 WebUI
+        self.webui = ShoubanhuaWebUI(self)
+        self.webui.register(self.context)
+
         logger.info(
             f"FigurinePro 插件已加载 v2.12.2 | LLM智能判断: {auto_detect_status} | 上下文轮数: {self._context_rounds}")
 

@@ -17,3 +17,6 @@ help: |
 version: v2.12.2
 author: shskjw
 repo: https://github.com/shskjw/astrbot_plugin_shoubanhua
+pages:
+  - name: dashboard
+    title: 手办工坊管理
