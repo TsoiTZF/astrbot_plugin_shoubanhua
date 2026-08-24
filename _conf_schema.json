@@ -441,6 +441,13 @@
         "hint": "开启后，Bot可以基于预设的人物参考图生成场景图片。",
         "default": false
     },
+    "persona_image_resolution": {
+        "description": "【人设】人设拍照专用分辨率",
+        "type": "string",
+        "options": ["1K", "2K", "4K"],
+        "hint": "仅影响人设真人化照片。推荐 2K，可减少 4K 图生图分块重绘产生的全局纹理、网格和过度锐化伪影；普通手办化仍使用上方全局分辨率。",
+        "default": "2K"
+    },
     "persona_name": {
         "description": "【人设】人设名称",
         "type": "string",

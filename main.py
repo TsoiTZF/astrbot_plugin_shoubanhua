@@ -768,7 +768,9 @@ class FigurineProPlugin(Star):
             "If photorealism conflicts with identity accuracy, identity accuracy has absolute priority. The final face must be immediately recognizable as the exact same character from the reference image.",
             "Preserve the exact hairstyle silhouette, bangs, base hair color, gradients, colored tips, and distinctive accessories. Do not simplify, recolor, restyle, or replace them.",
             "Unless the user explicitly asks for a group photo or 合影, show only this one persona character and do not add extra people, standees, posters, cards, mirrors, or reference characters.",
-            "Natural pose and expression, candid moment, professional photography, realistic skin pores and hair strands, high quality, detailed.",
+            "Natural pose and expression, candid moment, professional photography, clean natural skin, natural hair strands, smooth continuous color gradients, high quality.",
+            "IMAGE CLEANLINESS RULE: Produce a clean natural photograph without any global texture overlay. No canvas texture, paper texture, fabric-like texture across the image, crosshatching, engraved lines, painterly brush strokes, halftone dots, moire patterns, checkerboard artifacts, grid seams, tiled details, repeating textures, excessive sharpening, or excessive micro-contrast.",
+            "Do not transfer anime line art, cel-shading edges, hatch marks, or illustration surface patterns into the photographic skin, hair, clothing, furniture, books, walls, or background. Each material must retain its own clean and natural photographic appearance.",
             "Do NOT include any phones, cameras, or selfie elements in the image."
         ]
 
@@ -2614,7 +2616,8 @@ class FigurineProPlugin(Star):
                                         uid: str, gid: str, count: int,
                                         extra_rules: str = "", hide_text: bool = False,
                                         charge_quota: bool = True,
-                                        suppress_user_error: bool = False) -> Dict[str, Any]:
+                                        suppress_user_error: bool = False,
+                                        resolution: str = None) -> Dict[str, Any]:
         """
         批量图生图后台任务 - 对同一张图片生成多个不同版本
 
@@ -2667,7 +2670,10 @@ class FigurineProPlugin(Star):
 
                         while retry_count <= max_retries:
                             start_time = datetime.now()
-                            res = await self.api_mgr.call_api(images, prompt, model, False, self.img_mgr.proxy)
+                            res = await self.api_mgr.call_api(
+                                images, prompt, model, False, self.img_mgr.proxy,
+                                resolution=resolution
+                            )
 
                             if isinstance(res, bytes):
                                 res = await self._prepare_send_image_bytes(res)
@@ -5909,6 +5915,12 @@ class FigurineProPlugin(Star):
         # 9. 计算是否隐藏输出文本（白名单用户和普通用户使用同一开关）
         hide_llm_result_text = True
 
+        # 人设真人化单独使用 2K，避免 4K 图生图分块重绘产生全局纹理与网格伪影。
+        persona_resolution = str(self.conf.get("persona_image_resolution", "2K") or "2K").strip().upper()
+        if persona_resolution not in {"1K", "2K", "4K"}:
+            persona_resolution = "2K"
+        logger.info(f"人设拍照：使用专用分辨率 {persona_resolution}")
+
         # 10. 等待拍照任务完成并确认图片已发送，再把成功结果交给二次 LLM 收尾。
         await self._register_pending_generation(event.unified_msg_origin, count)
         if count == 1:
@@ -5923,7 +5935,8 @@ class FigurineProPlugin(Star):
                 cost=1,
                 extra_rules=extra_request,
                 hide_text=hide_llm_result_text,
-                suppress_user_error=True
+                suppress_user_error=True,
+                resolution=persona_resolution
             )
             if not success:
                 return self._build_llm_tool_failure(error_msg)
@@ -5948,7 +5961,8 @@ class FigurineProPlugin(Star):
                 count=count,
                 extra_rules=extra_request,
                 hide_text=hide_llm_result_text,
-                suppress_user_error=True
+                suppress_user_error=True,
+                resolution=persona_resolution
             )
             total_success = int(batch_result.get("success", 0))
             total_fail = int(batch_result.get("fail", 0))
@@ -6055,7 +6069,10 @@ class FigurineProPlugin(Star):
         # 调用 API
         model = self.conf.get("model", "nano-banana")
         start = datetime.now()
-        res = await self.api_mgr.call_api(final_images, full_prompt, model, False, self.img_mgr.proxy)
+        res = await self.api_mgr.call_api(
+            final_images, full_prompt, model, False, self.img_mgr.proxy,
+            resolution=str(self.conf.get("persona_image_resolution", "2K") or "2K").strip().upper()
+        )
 
         if isinstance(res, bytes):
             res = await self._prepare_send_image_bytes(res)
