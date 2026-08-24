@@ -124,19 +124,24 @@ createApp({
             }, 3000);
         };
 
-        const handleApiRes = (res) => {
-            if (!res || res.status === 'error') {
-                const msg = res?.message || '请求处理失败';
+        const unwrapApiResponse = (res) => {
+            if (res && res.status === 'error') {
+                const msg = res.message || '请求处理失败';
                 showToast(msg, 'error');
                 throw new Error(msg);
             }
-            return res;
+            // AstrBot Plugin Page Bridge 通常会自动解包标准响应的 data；
+            // 直接访问回退模式则仍可能返回 {status, data}，两种结构都要兼容。
+            if (res && res.status === 'ok' && Object.prototype.hasOwnProperty.call(res, 'data')) {
+                return res.data;
+            }
+            return res ?? {};
         };
 
         const fetchBootstrap = async () => {
             try {
-                const res = handleApiRes(await client.get('bootstrap'));
-                Object.assign(stats, res.data);
+                const data = unwrapApiResponse(await client.get('bootstrap'));
+                Object.assign(stats, data);
                 tester.model = stats.active_model;
                 tester.resolution = stats.image_resolution;
                 tester.aspectRatio = stats.image_aspect_ratio;
@@ -146,8 +151,8 @@ createApp({
         const fetchPrompts = async () => {
             loading.value = true;
             try {
-                const res = handleApiRes(await client.get('prompts'));
-                prompts.value = res.data || [];
+                const data = unwrapApiResponse(await client.get('prompts'));
+                prompts.value = Array.isArray(data) ? data : [];
                 stats.total_prompts = prompts.value.length;
                 stats.custom_prompts_count = prompts.value.filter(p => p.is_custom).length;
             } finally {
@@ -157,8 +162,8 @@ createApp({
 
         const fetchPersona = async () => {
             try {
-                const res = handleApiRes(await client.get('persona'));
-                Object.assign(personaForm, res.data);
+                const data = unwrapApiResponse(await client.get('persona'));
+                Object.assign(personaForm, data);
             } catch (e) {}
         };
 
@@ -242,8 +247,8 @@ createApp({
             ioModal.loading = true;
             ioModal.show = true;
             try {
-                const res = handleApiRes(await client.get('prompts/export'));
-                ioModal.text = res.data.text;
+                const data = unwrapApiResponse(await client.get('prompts/export'));
+                ioModal.text = data.text || '';
             } finally {
                 ioModal.loading = false;
             }
@@ -253,11 +258,12 @@ createApp({
             if (!ioModal.text.trim()) return showToast('请输入要导入的预设文本', 'error');
             ioModal.loading = true;
             try {
-                const res = handleApiRes(await client.post('prompts/import', {
+                const res = await client.post('prompts/import', {
                     text: ioModal.text,
                     overwrite: ioModal.overwrite,
-                }));
-                showToast(res.message || '导入完成');
+                });
+                const data = unwrapApiResponse(res);
+                showToast(res?.message || data?.message || '导入完成');
                 ioModal.show = false;
                 await fetchPrompts();
             } finally {
@@ -270,8 +276,8 @@ createApp({
             refModal.show = true;
             refModal.loading = true;
             try {
-                const res = handleApiRes(await client.get('ref-images', { preset_name: presetName }));
-                refModal.images = res.data.images || [];
+                const data = unwrapApiResponse(await client.get('ref-images', { preset_name: presetName }));
+                refModal.images = data.images || [];
             } finally {
                 refModal.loading = false;
             }
@@ -365,15 +371,15 @@ createApp({
             tester.resultImage = null;
             tester.resultMeta = null;
             try {
-                const res = handleApiRes(await client.post('test-generate', {
+                const data = unwrapApiResponse(await client.post('test-generate', {
                     prompt: tester.prompt,
                     input_image: tester.inputImage,
                     model: tester.model,
                     aspect_ratio: tester.aspectRatio,
                     resolution: tester.resolution,
                 }));
-                tester.resultImage = res.data.image_url;
-                tester.resultMeta = res.data;
+                tester.resultImage = data.image_url;
+                tester.resultMeta = data;
                 showToast('生成成功');
             } finally {
                 tester.loading = false;
