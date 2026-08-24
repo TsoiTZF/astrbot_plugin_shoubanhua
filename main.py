@@ -1,4 +1,4 @@
-﻿import re
+import re
 import asyncio
 import json
 from datetime import datetime
@@ -5986,116 +5986,39 @@ class FigurineProPlugin(Star):
 
     @filter.command("人设拍照", prefix_optional=True)
     async def on_persona_photo_cmd(self, event: AstrMessageEvent, ctx=None):
-        """生成人设角色的日常照片（指令模式）
+        """生成人设角色的日常照片；统一复用 LLM 工具路径以确保画风和参数完全一致。
 
         用法: #人设拍照 [场景] [额外要求]
         示例: #人设拍照 咖啡店 穿白色连衣裙
         """
-        if not self._persona_mode:
-            yield event.chain_result([Plain("人设功能还没开，联系管理员设置一下吧")])
-            return
-
-        # 加载人设参考图
-        ref_images = await self._load_persona_ref_images()
-        if not ref_images:
-            yield event.chain_result([Plain("人设参考图还没配置好，先用 #人设参考图添加 添加几张吧")])
-            return
-
-        # 解析参数
         parts = event.message_str.split(maxsplit=2)
         scene_hint = parts[1] if len(parts) > 1 else ""
         extra_request = parts[2] if len(parts) > 2 else ""
-
-        user_images = await self.img_mgr.extract_images_from_event(
-            event, ignore_id=self._get_bot_id(event), context=self.context
-        )
-        ref_text = " ".join([scene_hint, extra_request])
-        if not user_images and any(kw in ref_text for kw in ["合影", "上面", "上图", "这张", "这图", "参考", "照着"]):
-            context_messages_full = await self.ctx_mgr.get_recent_messages(event.unified_msg_origin, count=self._context_rounds)
-            last_img_msg = self.ctx_mgr.get_last_image_message(context_messages_full)
-            if last_img_msg and last_img_msg.image_urls:
-                for url in last_img_msg.image_urls:
-                    img_bytes = await self.img_mgr.load_bytes(url)
-                    if img_bytes:
-                        user_images.append(img_bytes)
-        final_images = ref_images + user_images
-
-        # 获取上下文用于场景匹配
-        session_id = event.unified_msg_origin
-        context_messages = await self.ctx_mgr.get_recent_messages(session_id, count=10)
-
-        context_text = scene_hint
-        if context_messages:
-            for msg in context_messages[-5:]:
-                if msg.is_bot:
-                    context_text += " " + msg.content
-
-        # 匹配场景
-        scene_name, scene_prompt = self._match_persona_scene(context_text)
-
-        # 构建提示词
-        full_prompt = self._build_persona_prompt(scene_prompt, extra_request)
-        full_prompt += " " + self._build_current_time_persona_hint()
-        if user_images:
-            if "合影" in ref_text:
-                full_prompt += (
-                    " The persona reference image is the main character and must keep identity priority."
-                    " The additional user reference image shows the other person to appear in the photo."
-                    " Create a natural group photo with both the persona character and the referenced person."
-                )
-            else:
-                full_prompt += (
-                    " Use the additional user reference image only as requested while keeping the persona reference identity unchanged."
-                )
-
-        # 检查配额
-        uid = norm_id(event.get_sender_id())
-        gid = norm_id(event.get_group_id())
-        deduction = await self._check_quota(event, uid, gid, 1)
-        if not deduction["allowed"]:
-            yield event.chain_result([Plain(deduction["msg"])])
-            return
-
-        # 发送反馈
-        persona_name = self.conf.get("persona_name", "小助手")
-        feedback = f"📸 正在生成 {persona_name} 的照片"
-        if scene_name:
-            feedback += f"\n🎬 场景: {scene_name}"
-        if extra_request:
-            feedback += f"\n📝 要求: {extra_request[:30]}..."
-        feedback += "\n⏳ 请稍候..."
-        yield event.chain_result([Plain(feedback)])
-
-        # 扣费
-        if deduction["source"] == "user":
-            await self.data_mgr.decrease_user_count(uid, 1)
-        elif deduction["source"] == "group":
-            await self.data_mgr.decrease_group_count(gid, 1)
-
-        # 调用 API
-        model = self.conf.get("model", "nano-banana")
-        start = datetime.now()
-        res = await self.api_mgr.call_api(
-            final_images, full_prompt, model, False, self.img_mgr.proxy,
-            resolution=str(self.conf.get("persona_image_resolution", "2K") or "2K").strip().upper()
+        request_text = " ".join([scene_hint, extra_request]).strip()
+        count = self._infer_requested_count_from_text(
+            request_text, default=1, multi_default=3
         )
 
-        if isinstance(res, bytes):
-            res = await self._prepare_send_image_bytes(res)
-            elapsed = (datetime.now() - start).total_seconds()
-            await self.data_mgr.record_usage(uid, gid)
-            await self._register_generation_success(event.unified_msg_origin, 1)
-            await self._register_generated_image(event.unified_msg_origin, res)
+        logger.info(
+            f"人设拍照指令：统一委托 persona_photo_tool，"
+            f"scene_hint={scene_hint or '无'}, count={count}"
+        )
+        result = await self.persona_photo_tool(
+            event=event,
+            scene_hint=scene_hint,
+            extra_request=extra_request,
+            count=count,
+        )
 
-            quota_str = self._get_quota_str(deduction, uid, gid)
-            timing_text = self._format_success_timing(elapsed)
-            info = f"\n✅ 生成成功 ({timing_text})"
-            if scene_name:
-                info += f" | 场景: {scene_name}"
-            info += f" | 剩余: {quota_str}"
-            yield event.chain_result([Image.fromBytes(res), Plain(info)])
-        else:
-            yield event.chain_result([Plain(f"没弄好: {self._resolve_debug_error_message(res, '这次没弄好，请稍后再试。')}")])
+        # persona_photo_tool 已主动发送进度与生成图片；命令入口只补充简短失败提示，
+        # 不向用户暴露 LLM 工具内部的状态标记和收尾指令。
+        result_text = str(result or "")
+        if result_text.startswith("[TOOL_FAILED]"):
+            yield event.chain_result([Plain("这次没拍好，请稍后再试。")])
+        elif result_text.startswith("[TOOL_UNAVAILABLE]"):
+            yield event.chain_result([Plain("人设拍照暂时不可用，请检查人设功能和参考图配置。")])
+        elif "【冷却中】" in result_text:
+            yield event.chain_result([Plain("刚拍过一张，稍等一会儿再试。")])
 
     @filter.command("人设参考图添加", aliases={"添加人设图"}, prefix_optional=True)
     async def on_add_persona_ref(self, event: AstrMessageEvent, ctx=None):
