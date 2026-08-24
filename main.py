@@ -725,9 +725,9 @@ class FigurineProPlugin(Star):
         Returns:
             完整的提示词
         """
-        persona_name = self.conf.get("persona_name", "小助手")
-        persona_desc = self.conf.get("persona_description", "一个可爱的二次元女孩")
-        photo_style = self.conf.get("persona_photo_style", "日常生活风格，自然光线，真实感")
+        persona_name = str(self.conf.get("persona_name", "") or "").strip() or "the persona character"
+        persona_desc = str(self.conf.get("persona_description", "") or "").strip() or "A distinctive anime character converted into a photorealistic human while preserving the original identity."
+        photo_style = str(self.conf.get("persona_photo_style", "") or "").strip() or "Natural daily-life photography, realistic lighting and skin texture."
 
         # [修复] 清理人设描述，防止包含框架系统指令
         # 仅保留纯描述部分，截断遇到的 '# 标题' 或 JSON 结构
@@ -758,13 +758,17 @@ class FigurineProPlugin(Star):
 
         prompt_parts = [
             f"Generate a natural daily life photo of {persona_name}.",
-            f"Character description: {persona_desc}",
+            f"Character description and immutable identity specification: {persona_desc}",
             f"Style: {photo_style}",
-            "The character identity must strictly remain the same as the persona reference image.",
-            "Preserve the original face, hairstyle, hair color, body shape, age appearance, and core character features from the persona reference.",
-            "The output must still clearly be the same character from the persona reference, not a different girl with similar clothes.",
+            "PHOTOREALISTIC IDENTITY CONVERSION RULE: Convert the exact same 2D character into a real human being; this is a material-and-lighting translation, never a character redesign.",
+            "The persona reference image is the sole authoritative identity anchor for facial geometry, eye shape, iris color, hairstyle, hair color, facial proportions, age impression, piercings, accessories, and overall recognizability.",
+            "Every identity attribute explicitly stated in the character description is immutable. Iris color is especially strict: keep the exact stated hue visibly saturated under all lighting; never turn red or wine-red eyes into brown, black, hazel, blue, gray, or pink eyes.",
+            "Preserve the original relative geometry of the eyes, eyebrows, nose, mouth, cheeks, jawline, and chin. Add realistic anatomical volume and skin texture without changing the face shape or creating a new face.",
+            "Do not normalize the character into a generic beautiful woman, influencer face, celebrity face, Korean-style template face, random Asian model, or another person's identity.",
+            "If photorealism conflicts with identity accuracy, identity accuracy has absolute priority. The final face must be immediately recognizable as the exact same character from the reference image.",
+            "Preserve the exact hairstyle silhouette, bangs, base hair color, gradients, colored tips, and distinctive accessories. Do not simplify, recolor, restyle, or replace them.",
             "Unless the user explicitly asks for a group photo or 合影, show only this one persona character and do not add extra people, standees, posters, cards, mirrors, or reference characters.",
-            "Natural pose and expression, candid moment, high quality, detailed.",
+            "Natural pose and expression, candid moment, professional photography, realistic skin pores and hair strands, high quality, detailed.",
             "Do NOT include any phones, cameras, or selfie elements in the image."
         ]
 
