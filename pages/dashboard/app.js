@@ -231,9 +231,65 @@ createApp({
             } catch (e) {}
         };
 
-        const copyPrompt = (item) => {
-            navigator.clipboard.writeText(item.prompt);
-            showToast(`已复制 [${item.key}] 提示词`);
+        const copyTextToClipboard = async (text) => {
+            const value = String(text ?? '');
+            if (!value) return false;
+
+            if (navigator.clipboard && window.isSecureContext) {
+                try {
+                    await navigator.clipboard.writeText(value);
+                    return true;
+                } catch (err) {
+                    console.warn('Clipboard API 不可用，尝试兼容复制方案:', err);
+                }
+            }
+
+            const textarea = document.createElement('textarea');
+            const activeElement = document.activeElement instanceof HTMLElement
+                ? document.activeElement
+                : null;
+            const selection = document.getSelection();
+            const ranges = selection
+                ? Array.from({ length: selection.rangeCount }, (_, index) => selection.getRangeAt(index).cloneRange())
+                : [];
+
+            textarea.value = value;
+            textarea.readOnly = true;
+            Object.assign(textarea.style, {
+                position: 'fixed',
+                left: '-9999px',
+                top: '0',
+                opacity: '0',
+                pointerEvents: 'none',
+            });
+            document.body.appendChild(textarea);
+            textarea.focus();
+            textarea.select();
+            textarea.setSelectionRange(0, value.length);
+
+            let copied = false;
+            try {
+                copied = document.execCommand('copy');
+            } catch (err) {
+                console.error('兼容复制方案执行失败:', err);
+            } finally {
+                textarea.remove();
+                if (selection) {
+                    selection.removeAllRanges();
+                    ranges.forEach(range => selection.addRange(range));
+                }
+                activeElement?.focus?.();
+            }
+            return copied;
+        };
+
+        const copyPrompt = async (item) => {
+            const copied = await copyTextToClipboard(item.prompt);
+            if (copied) {
+                showToast(`已复制 [${item.key}] 的完整提示词`);
+            } else {
+                showToast('复制失败，请打开编辑窗口后手动选择提示词', 'error');
+            }
         };
 
         const openImportModal = () => {
