@@ -5,11 +5,12 @@ from datetime import datetime
 from typing import Optional, List, Tuple, Any, Dict
 
 from astrbot import logger
-from astrbot.api.event import filter
+from astrbot.api.event import filter, MessageChain
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.core import AstrBotConfig
 from astrbot.core.message.components import Image, Plain, Node, Nodes, At, Reply
 from astrbot.core.platform.astr_message_event import AstrMessageEvent
+from astrbot.core.star.filter.command import GreedyStr
 
 # 导入模块
 from .data_manager import DataManager
@@ -3212,13 +3213,40 @@ class FigurineProPlugin(Star):
 
     # ================= 传统指令触发 =================
 
-    @filter.event_message_type(filter.EventMessageType.ALL, priority=5)
+    @filter.command("bnn", prefix_optional=True)
+    async def on_bnn_command(self, event: AstrMessageEvent, prompt: GreedyStr):
+        """正式的 bnn 命令入口，避免引用消息被当作普通聊天。"""
+        logger.info(
+            f"FigurinePro: 正式 bnn 命令入口已命中, "
+            f"has_reply={any(isinstance(seg, Reply) for seg in event.message_obj.message)}, "
+            f"prompt={str(prompt)!r}"
+        )
+        async for result in self.on_figurine_request(event):
+            yield result
+
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=110)
     async def on_figurine_request(self, event: AstrMessageEvent, ctx=None):
-        if self.conf.get("prefix", True) and not event.is_at_or_wake_command:
+        text = event.message_str.strip()
+        if not text:
             return
 
-        text = event.message_str.strip()
-        if not text: return
+        parts = text.split(maxsplit=1)
+        cmd_raw = parts[0]
+        match = re.search(r"[\(（](\d+)[\)）]$", cmd_raw)
+        model_idx_override = int(match.group(1)) - 1 if match else None
+        base_cmd = cmd_raw[:match.start()] if match else cmd_raw
+        extra_prefix = str(self.conf.get("extra_prefix", "bnn") or "bnn").strip()
+        is_bnn = (base_cmd == extra_prefix)
+
+        # 引用消息在部分平台/插件组合下可能丢失唤醒标志；明确的 bnn 指令仍应优先交给本插件。
+        if self.conf.get("prefix", True) and not event.is_at_or_wake_command and not is_bnn:
+            return
+
+        logger.info(
+            f"FigurinePro: 收到传统绘图指令 base_cmd={base_cmd!r}, "
+            f"is_bnn={is_bnn}, has_reply={any(isinstance(seg, Reply) for seg in event.message_obj.message)}, "
+            f"wake={event.is_at_or_wake_command}"
+        )
 
         # 消息去重检查：防止多平台重复处理同一消息
         msg_id = str(event.message_obj.message_id)
@@ -3227,17 +3255,8 @@ class FigurineProPlugin(Star):
             logger.debug(f"FigurinePro: 消息 {msg_id} 已被处理，跳过重复执行")
             return
 
-        parts = text.split(maxsplit=1)
-        cmd_raw = parts[0]
-        match = re.search(r"[\(（](\d+)[\)）]$", cmd_raw)
-        model_idx_override = int(match.group(1)) - 1 if match else None
-        base_cmd = cmd_raw[:match.start()] if match else cmd_raw
-
         user_prompt = ""
         preset_name = "自定义"
-
-        extra_prefix = self.conf.get("extra_prefix", "bnn")
-        is_bnn = (base_cmd == extra_prefix)
 
         if is_bnn:
             user_prompt = parts[1] if len(parts) > 1 else ""
@@ -3270,27 +3289,44 @@ class FigurineProPlugin(Star):
             event.stop_event()
             return
 
-        # 立即阻止事件继续传递，防止重复触发
-        event.stop_event()
-
-        # 指令模式：先启动本处理流程，再发提示，避免被 after_message_sent 类插件截断后半段逻辑。
+        # 先向用户确认任务已接收，再停止后续插件处理，避免私聊中长时间无可见反馈。
         _internal = {"自定义", "编辑", "edit", "custom"}
         preset_display = "" if (not preset_name or preset_name.strip().lower() in _internal) else preset_name
         template = self.conf.get("generating_msg_template", "🎨 收到请求，正在生成 [{preset}]...")
         feedback = template.replace("{preset}", preset_display) if preset_display else template.replace(" [{preset}]",
                                                                                                         "").replace(
             "[{preset}]", "")
-        await event.send(event.chain_result([Plain(feedback)]))
+        logger.info(
+            f"FigurinePro: 准备发送指令进度提示 base_cmd={base_cmd!r}, "
+            f"target={event.get_sender_id()}, text={feedback!r}"
+        )
+        await event.send(MessageChain([Plain(feedback)]))
+        logger.info(
+            f"FigurinePro: 指令进度提示已发送 base_cmd={base_cmd!r}, "
+            f"target={event.get_sender_id()}"
+        )
+
+        # 进度提示发送成功后再阻止事件继续传递，防止重复触发。
+        event.stop_event()
 
         bot_id = self._get_bot_id(event)
+        has_reply = any(isinstance(seg, Reply) for seg in event.message_obj.message)
         # 传递 bot_id 给 image manager 以过滤，并传入 context 支持 message_id
         images = await self.img_mgr.extract_images_from_event(event, ignore_id=bot_id, context=self.context)
+        logger.info(
+            f"FigurinePro: 指令图片提取完成 base_cmd={base_cmd!r}, "
+            f"has_reply={has_reply}, image_count={len(images)}"
+        )
         if images:
             await self._remember_session_image_context(
                 event.unified_msg_origin,
                 image_bytes_list=images,
                 source="user_current"
             )
+
+        if is_bnn and has_reply and not images:
+            yield event.chain_result([Plain("引用图片读取失败，请重新发送图片后再试。")])
+            return
 
         if not is_bnn and user_prompt:
             urls = extract_image_urls_from_text(user_prompt)
