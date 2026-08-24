@@ -763,7 +763,11 @@ class FigurineProPlugin(Star):
             "PHOTOREALISTIC IDENTITY CONVERSION RULE: Convert the exact same 2D character into a real human being; this is a material-and-lighting translation, never a character redesign.",
             "The persona reference image is the sole authoritative identity anchor for facial geometry, eye shape, iris color, hairstyle, hair color, facial proportions, age impression, piercings, accessories, and overall recognizability.",
             "Every identity attribute explicitly stated in the character description is immutable. Iris color is especially strict: keep the exact stated hue visibly saturated under all lighting; never turn red or wine-red eyes into brown, black, hazel, blue, gray, or pink eyes.",
-            "Preserve the original relative geometry of the eyes, eyebrows, nose, mouth, cheeks, jawline, and chin. Add realistic anatomical volume and skin texture without changing the face shape or creating a new face.",
+            "Preserve the original relative geometry of the eyes, eyebrows, nose, mouth, cheeks, jawline, and chin. Add restrained realistic anatomical volume and localized skin texture without changing the face shape or creating a new face.",
+            "FULL-BODY HUMAN SKIN CONSISTENCY: Every visible skin area must share one coherent realistic photographic material, including the face, ears, neck, shoulders, chest, arms, elbows, hands, fingers, legs, knees, and feet when visible. Do not render a smooth porcelain face together with a different plastic or overly sharp body.",
+            "Use subtle localized human skin micro-texture only where naturally appropriate: fine pores mainly around the nose and T-zone, very light cheek texture, fine facial and body peach fuzz, natural lip lines, gentle under-eye texture, delicate knuckle and joint creases, slight non-uniform color variation, and restrained natural translucency. Keep it soft and photographic at normal portrait distance.",
+            "The skin should remain youthful, soft, and attractive, but must not look airbrushed, waxy, porcelain-like, silicone-like, plastic, doll-like, or completely poreless. Do not spread skin texture onto hair, clothing, furniture, books, walls, or the background.",
+            "SKIN NEGATIVE RULE: No porcelain skin, waxy skin, silicone skin, plastic face or body, doll-like skin, airbrushed skin, excessive beauty filter, artificial smoothing, uniform flat skin color, painted skin, rubber texture, or mismatched texture and sharpness between the face and body.",
             "Do not normalize the character into a generic beautiful woman, influencer face, celebrity face, Korean-style template face, random Asian model, or another person's identity.",
             "If photorealism conflicts with identity accuracy, identity accuracy has absolute priority. The final face must be immediately recognizable as the exact same character from the reference image.",
             "Preserve the identity-defining hair semantics: long light-golden hair, orderly full bangs, the original overall length and silhouette, and the coral-pink to pale-pink gradient at the ends. These colors and recognizable design cues are immutable.",
@@ -5895,8 +5899,20 @@ class FigurineProPlugin(Star):
         raw_count = requested_count
         count, count_limited = self._normalize_generation_count(requested_count, "persona")
 
-        # 7. 根据配置决定是否发送进度提示
-        if self._get_conf_bool("llm_show_progress", True):
+        command_mode = bool(event.get_extra("shoubanhua_persona_command_mode", False))
+
+        # 指令模式保留原有结构化反馈；LLM 工具模式使用人格化、口语化反馈。
+        if command_mode:
+            persona_display_name = str(self.conf.get("persona_name", "") or "").strip() or "人设角色"
+            feedback = f"📸 正在生成 {persona_display_name} 的照片"
+            if scene_name:
+                feedback += f"\n🎬 场景: {scene_name}"
+            if extra_request:
+                extra_preview = extra_request[:30] + ("..." if len(extra_request) > 30 else "")
+                feedback += f"\n📝 要求: {extra_preview}"
+            feedback += "\n⏳ 请稍候..."
+            await event.send(event.chain_result([Plain(feedback)]))
+        elif self._get_conf_bool("llm_show_progress", True):
             feedback = self._build_llm_progress_text(
                 "persona", count=count, scene_name=scene_name,
                 extra_request=extra_request, has_user_images=bool(user_images)
@@ -5918,8 +5934,8 @@ class FigurineProPlugin(Star):
         # 8.1 新任务开始前，若当前会话空闲则清掉上一轮生成缓存，避免后续 PDF 混入旧图
         await self._clear_session_image_cache_if_idle(event.unified_msg_origin)
 
-        # 9. 计算是否隐藏输出文本（白名单用户和普通用户使用同一开关）
-        hide_llm_result_text = True
+        # 指令模式保留生成成功文字；LLM 工具模式交给模型自然收尾。
+        hide_llm_result_text = not command_mode
 
         # 人设真人化单独使用 2K，避免 4K 图生图分块重绘产生全局纹理与网格伪影。
         persona_resolution = str(self.conf.get("persona_image_resolution", "2K") or "2K").strip().upper()
@@ -5941,7 +5957,7 @@ class FigurineProPlugin(Star):
                 cost=1,
                 extra_rules=extra_request,
                 hide_text=hide_llm_result_text,
-                suppress_user_error=True,
+                suppress_user_error=not command_mode,
                 resolution=persona_resolution
             )
             if not success:
@@ -5967,7 +5983,7 @@ class FigurineProPlugin(Star):
                 count=count,
                 extra_rules=extra_request,
                 hide_text=hide_llm_result_text,
-                suppress_user_error=True,
+                suppress_user_error=not command_mode,
                 resolution=persona_resolution
             )
             total_success = int(batch_result.get("success", 0))
@@ -6003,12 +6019,16 @@ class FigurineProPlugin(Star):
             f"人设拍照指令：统一委托 persona_photo_tool，"
             f"scene_hint={scene_hint or '无'}, count={count}"
         )
-        result = await self.persona_photo_tool(
-            event=event,
-            scene_hint=scene_hint,
-            extra_request=extra_request,
-            count=count,
-        )
+        event.set_extra("shoubanhua_persona_command_mode", True)
+        try:
+            result = await self.persona_photo_tool(
+                event=event,
+                scene_hint=scene_hint,
+                extra_request=extra_request,
+                count=count,
+            )
+        finally:
+            event.set_extra("shoubanhua_persona_command_mode", False)
 
         # persona_photo_tool 已主动发送进度与生成图片；命令入口只补充简短失败提示，
         # 不向用户暴露 LLM 工具内部的状态标记和收尾指令。
